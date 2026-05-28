@@ -31,7 +31,7 @@ We propose SAMed, a general solution for medical image segmentation. Different f
 ## Prerequisites
 - Linux (We tested our codes on Ubuntu 18.04)
 - Anaconda
-- Python 3.7.11
+- Python 3.10
 - Pytorch 1.9.1
 
 To get started, first please clone the repo
@@ -40,7 +40,7 @@ git clone https://github.com/hitachinsk/SAMed.git
 ```
 Then, please run the following commands:
 ```
-conda create -n SAMed python=3.7.11
+conda create -n SAMed python=3.10
 conda activate SAMed
 pip install -r requirements.txt
 ```
