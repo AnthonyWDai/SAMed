@@ -8,7 +8,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from segment_anything import sam_model_registry
-from trainer import trainer_synapse
+from trainerV2 import trainer_psma
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -257,7 +257,7 @@ def main():
     set_seed(args.seed, deterministic=bool(args.deterministic))
 
     dataset_config = {
-        "Synapse": {
+        "PSMA": {
             "root_path": args.root_path,
             "list_dir": args.list_dir,
             "num_classes": args.num_classes,
@@ -278,7 +278,7 @@ def main():
     save_config(args, snapshot_path)
 
     trainers = {
-        "Synapse": trainer_synapse,
+        "PSMA": trainer_psma,
     }
 
     trainers[args.dataset](args, net, str(snapshot_path), multimask_output, low_res)
