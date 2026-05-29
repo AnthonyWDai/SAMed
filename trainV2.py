@@ -196,6 +196,8 @@ def build_snapshot_path(args) -> Path:
     if args.seed != 1234:
         suffixes.append(f"s{args.seed}")
 
+    suffixes.append(f"freeze{args.freeze}")
+
     snapshot_name = "_".join([exp_name] + suffixes)
     snapshot_path = Path(args.output) / snapshot_name
     snapshot_path.mkdir(parents=True, exist_ok=True)
