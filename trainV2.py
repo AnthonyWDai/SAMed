@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         type=str,
-        default="Synapse",
+        default="PSMA",
         help="Dataset name.",
     )
     parser.add_argument(
