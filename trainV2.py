@@ -227,14 +227,14 @@ def build_model(args):
     if args.lora_ckpt is not None:
         net.load_lora_parameters(args.lora_ckpt)
 
-    # Freeze prompt encoder
+    # Freeze image encoder
     if args.freeze >= 1:
-        for p in net.sam.prompt_encoder.parameters():
+        for p in net.sam.image_encoder.parameters():
             p.requires_grad = False
 
-    # Freeze image encoder
+    # Freeze prompt encoder (SAMed change prompt encoder)
     if args.freeze >= 2:
-        for p in net.sam.image_encoder.parameters():
+        for p in net.sam.prompt_encoder.parameters():
             p.requires_grad = False
 
     # Train mask decoder
