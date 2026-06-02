@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--num_classes",
         type=int,
         default=8,
-        help="Number of output segmentation classes. Exclude background",
+        help="Number of output segmentation classes. Exclude background. num_multimask_outputs",
     )
     parser.add_argument(
         "--max_iterations",
