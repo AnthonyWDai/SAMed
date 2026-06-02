@@ -7,16 +7,63 @@ from torch.utils.data import Dataset
 
 
 class RandomGenerator(object):
-    def __init__(self, output_size, low_res):
-        self.output_size = output_size  # (H, W)
-        self.low_res = low_res          # (H, W)
+    def __init__(self, output_size, low_res, normalize_mode="auto"):
+        """
+        Args:
+            output_size: tuple (H, W)
+            low_res: tuple (H, W)
+            normalize_mode:
+                - "auto": uint8 -> /255; float [0,1] keep; float [0,255] -> /255; otherwise z-score
+                - "none": no normalization
+                - "0_1": divide by 255 if max > 1
+                - "zscore": per-image z-score
+        """
+        self.output_size = output_size
+        self.low_res = low_res
+        self.normalize_mode = normalize_mode
 
     def _resize_image(self, image, size):
-        # size: (H, W), cv2 expects (W, H)
         return cv2.resize(image, (size[1], size[0]), interpolation=cv2.INTER_LINEAR)
 
     def _resize_mask(self, mask, size):
         return cv2.resize(mask, (size[1], size[0]), interpolation=cv2.INTER_NEAREST)
+
+    def _normalize(self, image, orig_dtype):
+        image = image.astype(np.float32)
+
+        if self.normalize_mode == "none":
+            return image
+
+        if self.normalize_mode == "0_1":
+            if np.nanmax(image) > 1.0:
+                image = image / 255.0
+            return image
+
+        if self.normalize_mode == "zscore":
+            mean = np.mean(image)
+            std = np.std(image)
+            if std > 0:
+                image = (image - mean) / (std + 1e-8)
+            return image
+
+        # auto
+        if orig_dtype == np.uint8:
+            image = image / 255.0
+            return image
+
+        img_min = np.nanmin(image)
+        img_max = np.nanmax(image)
+
+        if img_min >= 0.0 and img_max <= 1.0:
+            return image
+        elif img_min >= 0.0 and img_max <= 255.0:
+            return image / 255.0
+        else:
+            mean = np.mean(image)
+            std = np.std(image)
+            if std > 0:
+                image = (image - mean) / (std + 1e-8)
+            return image
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
@@ -28,12 +75,14 @@ class RandomGenerator(object):
         label_hr = self._resize_mask(label, self.output_size)
         label_lr = self._resize_mask(label, self.low_res)
 
-        image = image.astype(np.float32)
+        orig_dtype = image.dtype
+        image = self._normalize(image, orig_dtype)
+
         label_hr = label_hr.astype(np.int64)
         label_lr = label_lr.astype(np.int64)
 
         if image.ndim == 2:
-            image = np.expand_dims(image, axis=0)   # H,W -> 1,H,W
+            image = np.expand_dims(image, axis=0)  # H,W -> 1,H,W
         elif image.ndim == 3:
             image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
         else:
@@ -48,18 +97,20 @@ class RandomGenerator(object):
 
 class PSMADataset(Dataset):
     """
-    Supports both:
+    Supports:
       1) flat:
          split/images/*.{jpg,jpeg,png,npy}
          split/masks/*.{png,jpg,jpeg,npy}
+
       2) nested:
          split/images/<case>/*.{jpg,jpeg,png,npy}
          split/masks/<case>/*.{png,jpg,jpeg,npy}
 
     Notes:
-    - Images are loaded as numpy arrays with original channel structure.
-    - No RGB conversion is applied.
-    - Masks are loaded as single-channel label maps when possible.
+    - Images are loaded as numpy arrays without RGB conversion.
+    - cv2 image loading keeps grayscale as HxW and color as HxWxC(BGR for color files).
+    - .npy images can be HxW, HxWxC, or CxHxW.
+    - Masks are expected to be label maps, preferably HxW.
     """
     IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".npy"]
     MASK_EXTS = [".png", ".jpg", ".jpeg", ".npy"]
@@ -111,13 +162,11 @@ class PSMADataset(Dataset):
         rel_stem = os.path.splitext(rel_path)[0]
         base_name = os.path.splitext(os.path.basename(image_path))[0]
 
-        # Preferred: preserve relative subfolder structure
         for ext in self.MASK_EXTS:
             candidate = os.path.join(self.mask_dir, rel_stem + ext)
             if os.path.isfile(candidate):
                 return candidate
 
-        # Fallback: same basename directly under masks/
         for ext in self.MASK_EXTS:
             candidate = os.path.join(self.mask_dir, base_name + ext)
             if os.path.isfile(candidate):
@@ -131,21 +180,15 @@ class PSMADataset(Dataset):
         if ext == ".npy":
             image = np.load(path)
         else:
-            # Keep native channel layout from file; no RGB conversion
             image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 raise ValueError(f"Failed to read image: {path}")
 
-            # cv2 loads color images as BGR. Since you said no RGB conversion,
-            # we keep the array as loaded.
-            # Grayscale stays HxW, color stays HxWxC.
+        if image.ndim == 3 and image.shape[0] in [1, 3] and image.shape[-1] not in [1, 3]:
+            image = np.transpose(image, (1, 2, 0))
 
         if image.ndim not in [2, 3]:
             raise ValueError(f"Unsupported image shape {image.shape} for file: {path}")
-
-        # If CHW npy is provided, convert to HWC for consistency before transform
-        if image.ndim == 3 and image.shape[0] in [1, 3] and image.shape[-1] not in [1, 3]:
-            image = np.transpose(image, (1, 2, 0))
 
         return image
 
@@ -160,7 +203,6 @@ class PSMADataset(Dataset):
                 raise ValueError(f"Failed to read mask: {path}")
 
         if mask.ndim == 3:
-            # Expecting label map; use first channel if multi-channel
             mask = mask[..., 0]
 
         if mask.ndim != 2:
