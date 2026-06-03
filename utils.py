@@ -11,6 +11,37 @@ from einops import repeat
 from icecream import ic
 
 
+class DiceLossV2(nn.Module):
+    def __init__(self, n_classes, include_background=False, smooth=1e-5):
+        super().__init__()
+        self.n_classes = n_classes
+        self.include_background = include_background
+        self.smooth = smooth
+
+    def forward(self, logits, target):
+        """
+        inputs: [B, C, H, W] logits or probabilities
+        target: [B, H, W] integer labels
+        """
+        probs = torch.softmax(logits, dim=1)
+
+        if target.dim() == 4 and target.size(1) == 1:
+            target = target.squeeze(1)
+
+        target_1h = F.one_hot(target.long(), num_classes=self.n_classes).permute(0, 3, 1, 2).float()
+
+        start = 0 if self.include_background else 1
+        probs = probs[:, start:]
+        target_1h = target_1h[:, start:]
+
+        dims = (0, 2, 3)  # batch + spatial
+        intersect = torch.sum(probs * target_1h, dims)
+        denom = torch.sum(probs * probs, dims) + torch.sum(target_1h * target_1h, dims)
+
+        dice = (2 * intersect + self.smooth) / (denom + self.smooth)
+        return 1 - dice.mean()
+
+
 class Focal_loss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2, num_classes=3, size_average=True):
         super(Focal_loss, self).__init__()
