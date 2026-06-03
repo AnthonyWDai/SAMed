@@ -69,7 +69,7 @@ class SimpleWriter:
 def calc_loss(outputs, low_res_labels, ce_loss, dice_loss, dice_weight: float = 0.8):
     low_res_logits = outputs["low_res_logits"]
     loss_ce = ce_loss(low_res_logits, low_res_labels.long())
-    loss_dice = dice_loss(low_res_logits, low_res_labels, softmax=True)
+    loss_dice = dice_loss(low_res_logits, low_res_labels)
     total_loss = (1.0 - dice_weight) * loss_ce + dice_weight * loss_dice
     return total_loss, loss_ce, loss_dice
 
