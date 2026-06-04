@@ -319,7 +319,7 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
                 loss_dice.item(),
             )
 
-            if iter_num % 20 == 0 and image_batch.shape[0] > 1:
+            if iter_num % 1000 == 0 and image_batch.shape[0] > 1:
                 image = image_batch[1, 0:1, :, :]
                 image = (image - image.min()) / (image.max() - image.min() + 1e-8)
                 writer.add_image("train/Image", image, iter_num)
