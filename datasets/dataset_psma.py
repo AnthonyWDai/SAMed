@@ -228,16 +228,38 @@ class PSMADataset(Dataset):
         if ext == ".npy":
             image = np.load(path)
 
-            # Accept HxW, HxWxC, or CxHxW
             if image.ndim == 2:
                 pass
             elif image.ndim == 3:
-                # Convert CHW -> HWC if needed
                 if image.shape[0] in [1, 3] and image.shape[-1] not in [1, 3]:
                     image = np.transpose(image, (1, 2, 0))
+
+                if image.shape[-1] == 1:
+                    image = image[..., 0]
+                elif image.shape[-1] == 3:
+                    image = image.astype(np.float32)
+                    lo, hi = np.percentile(image, [1, 99])
+                    if hi > lo:
+                        image = np.clip(image, lo, hi)
+                        image = (image - lo) / (hi - lo)
+                    else:
+                        image = np.zeros_like(image, dtype=np.float32)
+                    return (image * 255).astype(np.uint8)
+                else:
+                    raise ValueError(f"Unsupported channel dimension in .npy image shape {image.shape} for file: {path}")
             else:
                 raise ValueError(f"Unsupported .npy image shape {image.shape} for file: {path}")
 
+            image = image.astype(np.float32)
+            lo, hi = np.percentile(image, [1, 99])
+            if hi > lo:
+                image = np.clip(image, lo, hi)
+                image = (image - lo) / (hi - lo)
+            else:
+                image = np.zeros_like(image, dtype=np.float32)
+
+            image = (image * 255).astype(np.uint8)
+            image = np.stack([image] * 3, axis=-1)
             return image
 
         image = Image.open(path).convert("RGB")

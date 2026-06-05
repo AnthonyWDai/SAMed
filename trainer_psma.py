@@ -253,7 +253,7 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
     ce_loss = CrossEntropyLoss()
     dice_loss = DiceLossV2(
-        num_classes,
+        num_classes + 1,
         include_background=True if num_classes == 1 else False
     )
 
