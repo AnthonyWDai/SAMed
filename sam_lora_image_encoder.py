@@ -80,9 +80,9 @@ class LoRA_Sam(nn.Module):
         self.w_As = []  # These are linear layers
         self.w_Bs = []
 
-        # # lets freeze first
-        # for param in sam_model.image_encoder.parameters():
-        #     param.requires_grad = False
+        # lets freeze first
+        for param in sam_model.image_encoder.parameters():
+            param.requires_grad = False
 
         # Here, we do the surgery
         for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
