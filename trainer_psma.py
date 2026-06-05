@@ -182,7 +182,7 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
 
 
 def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
-    from datasets.dataset_psmaV2 import PSMADataset, TrainTransform, ValTransform
+    from datasets.dataset_psma import PSMADataset, TrainTransform, ValTransform
 
     os.makedirs(snapshot_path, exist_ok=True)
     logging.basicConfig(

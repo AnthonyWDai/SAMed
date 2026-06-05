@@ -7,55 +7,146 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
-class RandomGenerator(object):
+import numpy as np
+import torch
+from PIL import Image
+from torchvision import transforms
+
+
+def _prepare_image_for_pil(image: np.ndarray) -> np.ndarray:
+    """
+    Convert image to uint8 HxW or HxWxC for PIL.
+    """
+    if not isinstance(image, np.ndarray):
+        image = np.array(image)
+
+    # Handle CHW -> HWC if needed
+    if image.ndim == 3 and image.shape[0] in [1, 3] and image.shape[-1] not in [1, 3]:
+        image = np.transpose(image, (1, 2, 0))
+
+    if image.dtype != np.uint8:
+        if np.issubdtype(image.dtype, np.floating):
+            # If already in [0,1], scale to [0,255]
+            if image.max() <= 1.0:
+                image = image * 255.0
+            image = np.clip(image, 0, 255)
+        else:
+            image = np.clip(image, 0, 255)
+        image = image.astype(np.uint8)
+
+    return image
+
+
+def _prepare_binary_label(label: np.ndarray) -> np.ndarray:
+    """
+    Ensure binary segmentation mask is strictly 0/1.
+    Accepts masks like {0,1}, {0,255}, or arbitrary positive foreground.
+    """
+    if not isinstance(label, np.ndarray):
+        label = np.array(label)
+
+    # Squeeze singleton channel if present
+    if label.ndim == 3 and label.shape[-1] == 1:
+        label = label[..., 0]
+    if label.ndim == 3 and label.shape[0] == 1:
+        label = label[0]
+
+    # Convert any positive value to 1
+    label = (label > 0).astype(np.uint8)
+    return label
+
+
+def _to_tensor_image(image: np.ndarray) -> torch.Tensor:
+    """
+    Convert HxW or HxWxC float image in [0,1] to CHW torch.float32.
+    """
+    if image.ndim == 2:
+        image = image[:, :, None]
+
+    if image.ndim != 3:
+        raise ValueError(f"Expected image ndim 2 or 3, got shape {image.shape}")
+
+    image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
+    return torch.from_numpy(image.astype(np.float32))
+
+
+class TrainTransform(object):
     def __init__(self, output_size, low_res):
-        self.output_size = output_size
-        self.low_res = low_res
+        self.output_size = tuple(output_size)
+        self.low_res = tuple(low_res)
+        self.resize_img = transforms.Resize(self.output_size, interpolation=Image.BILINEAR)
+        self.resize_mask_hr = transforms.Resize(self.output_size, interpolation=Image.NEAREST)
+        self.resize_mask_lr = transforms.Resize(self.low_res, interpolation=Image.NEAREST)
 
     def __call__(self, sample):
-        image, label = sample['image'], sample['label']
+        image, label = sample["image"], sample["label"]
 
-        # Ensure image is uint8 for PIL conversion
-        if image.dtype != np.uint8:
-            if np.issubdtype(image.dtype, np.floating):
-                # If float image is in [0,1], scale to [0,255]
-                if image.max() <= 1.0:
-                    image = image * 255.0
-                image = np.clip(image, 0, 255).astype(np.uint8)
-            else:
-                image = np.clip(image, 0, 255).astype(np.uint8)
+        # --- image ---
+        image = _prepare_image_for_pil(image)
+        image_pil = Image.fromarray(image)
 
-        # Ensure label is uint8 for PIL conversion
-        if label.dtype != np.uint8:
-            label = label.astype(np.uint8)
+        # --- label ---
+        label = _prepare_binary_label(label)
+        label_pil = Image.fromarray(label)
 
-        image = Image.fromarray(image)
-        label = Image.fromarray(label)
+        # Resize
+        image_resized = self.resize_img(image_pil)
+        label_hr = self.resize_mask_hr(label_pil)
 
-        resize_img = transforms.Resize(self.output_size, interpolation=Image.BILINEAR)
-        resize_mask = transforms.Resize(self.output_size, interpolation=Image.NEAREST)
-        resize_low_res = transforms.Resize(self.low_res, interpolation=Image.NEAREST)
+        # IMPORTANT: derive low-res label from high-res resized label for consistency
+        label_lr = self.resize_mask_lr(label_hr)
 
-        image = resize_img(image)
-        label_hr = resize_mask(label)
-        label_lr = resize_low_res(label)
+        # Convert back to numpy
+        image_np = np.array(image_resized).astype(np.float32) / 255.0
+        label_hr_np = np.array(label_hr).astype(np.uint8)
+        label_lr_np = np.array(label_lr).astype(np.uint8)
 
-        image = np.array(image).astype(np.float32)
-        label_hr = np.array(label_hr).astype(np.uint8)
-        label_lr = np.array(label_lr).astype(np.uint8)
-
-        if image.ndim == 2:
-            image = np.expand_dims(image, axis=-1)
-
-        image = image / 255.0
-        image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
+        # Final label sanitization after resize
+        label_hr_np = (label_hr_np > 0).astype(np.uint8)
+        label_lr_np = (label_lr_np > 0).astype(np.uint8)
 
         return {
-            'image': torch.from_numpy(image).float(),
-            'label': torch.from_numpy(label_hr).long(),
-            'low_res_label': torch.from_numpy(label_lr).long()
+            "image": _to_tensor_image(image_np),
+            "label": torch.from_numpy(label_hr_np).long(),
+            "low_res_label": torch.from_numpy(label_lr_np).long(),
         }
 
+
+class ValTransform(object):
+    def __init__(self, output_size, low_res):
+        self.output_size = tuple(output_size)
+        self.low_res = tuple(low_res)
+        self.resize_img = transforms.Resize(self.output_size, interpolation=Image.BILINEAR)
+        self.resize_mask_hr = transforms.Resize(self.output_size, interpolation=Image.NEAREST)
+        self.resize_mask_lr = transforms.Resize(self.low_res, interpolation=Image.NEAREST)
+
+    def __call__(self, sample):
+        image, label = sample["image"], sample["label"]
+
+        # Deterministic preprocessing only
+        image = _prepare_image_for_pil(image)
+        label = _prepare_binary_label(label)
+
+        image_pil = Image.fromarray(image)
+        label_pil = Image.fromarray(label)
+
+        image_resized = self.resize_img(image_pil)
+        label_hr = self.resize_mask_hr(label_pil)
+        label_lr = self.resize_mask_lr(label_hr)
+
+        image_np = np.array(image_resized).astype(np.float32) / 255.0
+        label_hr_np = np.array(label_hr).astype(np.uint8)
+        label_lr_np = np.array(label_lr).astype(np.uint8)
+
+        label_hr_np = (label_hr_np > 0).astype(np.uint8)
+        label_lr_np = (label_lr_np > 0).astype(np.uint8)
+
+        return {
+            "image": _to_tensor_image(image_np),
+            "label": torch.from_numpy(label_hr_np).long(),
+            "low_res_label": torch.from_numpy(label_lr_np).long(),
+        }
+    
 
 class PSMADataset(Dataset):
     """

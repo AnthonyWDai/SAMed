@@ -8,7 +8,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 from segment_anything import sam_model_registry
-from trainerV2 import trainer_psma
+from trainer_psma import trainer_psma
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -149,12 +149,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.8,
         help="Weight for Dice-related loss term.",
     )
-    parser.add_argument(
-        "--freeze",
-        type=int,
-        default=1,
-        help="Whether to freeze parts of the backbone.",
-    )
 
     return parser
 
@@ -196,8 +190,6 @@ def build_snapshot_path(args) -> Path:
     if args.seed != 1234:
         suffixes.append(f"s{args.seed}")
 
-    suffixes.append(f"freeze{args.freeze}")
-
     snapshot_name = "_".join([exp_name] + suffixes)
     snapshot_path = Path(args.output) / snapshot_name
     snapshot_path.mkdir(parents=True, exist_ok=True)
@@ -226,28 +218,6 @@ def build_model(args):
 
     if args.lora_ckpt is not None:
         net.load_lora_parameters(args.lora_ckpt)
-
-    # Freeze image encoder
-    if args.freeze >= 1:
-        for p in net.sam.image_encoder.parameters():
-            p.requires_grad = False
-
-    # Freeze prompt encoder (SAMed change prompt encoder)
-    if args.freeze >= 2:
-        for p in net.sam.prompt_encoder.parameters():
-            p.requires_grad = False
-
-    # Train mask decoder
-    if args.freeze >= 3:
-        for p in net.sam.mask_decoder.iou_token.parameters():
-            p.requires_grad = False
-
-        for p in net.sam.mask_decoder.mask_tokens.parameters():
-            p.requires_grad = False
-
-    if args.freeze >= 4:
-        for p in net.sam.mask_decoder.transformer.parameters():
-            p.requires_grad = False
 
     return net, img_embedding_size
 
