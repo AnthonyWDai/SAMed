@@ -16,6 +16,8 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 from utils import DiceLossV2
 
+from datasets.dataset_psmav2 import PSMADataset, TrainTransform, ValTransform
+
 
 class SimpleWriter:
     def __init__(self, log_dir):
@@ -114,21 +116,30 @@ def compute_seg_dice(pred, target, num_classes, eps=1e-5):
     """
     pred: [B, H, W] predicted class ids
     target: [B, H, W] ground truth class ids
-    Returns mean dice across foreground classes [1..num_classes],
-    ignoring samples where a class is absent in both pred and target.
+
+    Returns mean Dice across foreground classes [1..num_classes].
+    If a class is absent in both pred and target for a sample, Dice for that
+    sample is defined as 1.0.
     """
+    assert pred.shape == target.shape, "pred and target must have the same shape"
+
     dices = []
+    reduce_dims = tuple(range(1, pred.ndim))
+
     for cls in range(1, num_classes + 1):
         pred_c = (pred == cls).float()
         target_c = (target == cls).float()
-        intersect = (pred_c * target_c).sum(dim=(1, 2))
-        denom = pred_c.sum(dim=(1, 2)) + target_c.sum(dim=(1, 2))
-        valid = denom > 0
-        if valid.any():
-            dice = (2.0 * intersect[valid] + eps) / (denom[valid] + eps)
-            dices.append(dice.mean())
-    if not dices:
-        return 0.0
+
+        intersect = (pred_c * target_c).sum(dim=reduce_dims)
+        denom = pred_c.sum(dim=reduce_dims) + target_c.sum(dim=reduce_dims)
+
+        dice = torch.where(
+            denom > 0,
+            (2.0 * intersect + eps) / (denom + eps),
+            torch.ones_like(denom)
+        )
+        dices.append(dice.mean())
+
     return torch.stack(dices).mean().item()
 
 
@@ -182,8 +193,6 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
 
 
 def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
-    from datasets.dataset_psma import PSMADataset, TrainTransform, ValTransform
-
     os.makedirs(snapshot_path, exist_ok=True)
     logging.basicConfig(
         filename=os.path.join(snapshot_path, "log.txt"),
