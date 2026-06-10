@@ -186,7 +186,6 @@ class LoRA_Sam(nn.Module):
     def forward(self, batched_input, multimask_output, image_size):
         return self.sam(batched_input, multimask_output, image_size)
 
-
     # def forward(self, x: Tensor) -> Tensor:
     #     return self.lora_vit(x)
 
