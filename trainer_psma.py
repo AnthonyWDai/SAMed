@@ -169,6 +169,7 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
         pred_masks = outputs["masks"]
         pred_masks = torch.argmax(torch.softmax(pred_masks, dim=1), dim=1)
 
+        # TODO: ignore_index
         batch_dice = compute_seg_dice(
             pred_masks,
             label_batch,
