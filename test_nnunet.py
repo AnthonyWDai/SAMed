@@ -89,6 +89,7 @@ def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
     return image
 
 
+# TODO: change to the following after new training scheme
 # def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
 #     """
 #     slice_2ch: (2, H, W)
