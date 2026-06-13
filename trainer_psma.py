@@ -111,35 +111,41 @@ def update_learning_rate(optimizer, base_lr, iter_num, max_iterations, warmup, w
     return lr
 
 
-def compute_seg_dice(pred, target, num_classes, eps=1e-5):
+def compute_seg_dice_stats(pred, target, num_classes, eps=1e-5):
     """
     pred:   [B, H, W] predicted class ids
     target: [B, H, W] ground truth class ids
 
-    Returns mean Dice across foreground classes [1..num_classes].
-    If a class is absent in both pred and target for a sample, Dice for that
-    sample is defined as 1.0.
+    Returns:
+        dice_sum: sum of Dice scores over valid (sample, class) pairs
+        valid_count: number of valid (sample, class) pairs
+
+    Valid means the class is present in pred or target.
+    Absent-in-both cases are excluded from aggregation.
     """
     assert pred.shape == target.shape, "pred and target must have the same shape"
 
-    dices = []
     reduce_dims = tuple(range(1, pred.ndim))
+    dice_sum = 0.0
+    valid_count = 0
 
     for cls in range(1, num_classes + 1):
         pred_c = (pred == cls).float()
         target_c = (target == cls).float()
 
         intersect = (pred_c * target_c).sum(dim=reduce_dims)
-        denom = pred_c.sum(dim=reduce_dims) + target_c.sum(dim=reduce_dims)
+        pred_sum = pred_c.sum(dim=reduce_dims)
+        target_sum = target_c.sum(dim=reduce_dims)
+        denom = pred_sum + target_sum
 
-        dice = torch.where(
-            denom > 0,
-            (2.0 * intersect + eps) / (denom + eps),
-            torch.ones_like(denom),
-        )
-        dices.append(dice.mean())
+        valid = denom > 0
 
-    return torch.stack(dices).mean().item()
+        if valid.any():
+            dice = (2.0 * intersect[valid] + eps) / (denom[valid] + eps)
+            dice_sum += dice.sum().item()
+            valid_count += valid.sum().item()
+
+    return dice_sum, valid_count
 
 
 def _extract_mask_from_sample(sample):
@@ -245,6 +251,7 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
     val_ce_total = 0.0
     val_dice_loss_total = 0.0
     val_metric_dice_total = 0.0
+    val_metric_dice_count = 0
     num_batches = 0
 
     for sampled_batch in valloader:
@@ -254,7 +261,6 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
 
         outputs = model(image_batch, multimask_output, args.img_size)
 
-        # loss should be computed against the same resolution used by model output
         loss, loss_ce, loss_dice = calc_loss(
             outputs,
             low_res_label_batch,
@@ -266,10 +272,8 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
         pred_masks = outputs["masks"]
         pred_masks = torch.argmax(torch.softmax(pred_masks, dim=1), dim=1)
 
-        # If output masks are low-res and label_batch is full-res, this assumes
-        # your model/transform pipeline returns matching resolution here.
-        # If not, resize prediction before metric computation.
-        batch_dice = compute_seg_dice(
+        # Make sure pred_masks and label_batch have the same spatial size.
+        dice_sum, dice_count = compute_seg_dice_stats(
             pred_masks,
             label_batch,
             args.num_classes,
@@ -278,14 +282,18 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
         val_loss_total += loss.item()
         val_ce_total += loss_ce.item()
         val_dice_loss_total += loss_dice.item()
-        val_metric_dice_total += batch_dice
+        val_metric_dice_total += dice_sum
+        val_metric_dice_count += dice_count
         num_batches += 1
 
     results = {
         "loss": val_loss_total / max(1, num_batches),
         "loss_ce": val_ce_total / max(1, num_batches),
         "loss_dice": val_dice_loss_total / max(1, num_batches),
-        "mean_dice": val_metric_dice_total / max(1, num_batches),
+        "mean_dice": (
+            val_metric_dice_total / val_metric_dice_count
+            if val_metric_dice_count > 0 else 0.0
+        ),
     }
 
     model.train()

@@ -74,52 +74,52 @@ def preprocess_case_nnunet(case_files, plans_manager, configuration_manager, dat
     return data, data_properties
 
 
-def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
-    """
-    slice_2ch: (2, H, W)
-    return: (H, W, 3) float32
-    channel0 = mod0
-    channel1 = mod1
-    channel2 = average(mod0, mod1)
-    """
-    c0 = slice_2ch[0]
-    c1 = slice_2ch[1]
-    c2 = 0.5 * (c0 + c1)
-    image = np.stack([c0, c1, c2], axis=-1).astype(np.float32)  # HWC
-    return image
-
-
-# TODO: change to the following after new training scheme
 # def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
 #     """
 #     slice_2ch: (2, H, W)
 #     return: (H, W, 3) float32
-
 #     channel0 = mod0
-#     channel1 = mod1 mapped to mod0 value range
-#     channel2 = average(channel0, channel1)
+#     channel1 = mod1
+#     channel2 = average(mod0, mod1)
 #     """
-#     if slice_2ch.shape[0] != 2:
-#         raise ValueError(f"Expected input shape (2, H, W), got {slice_2ch.shape}")
-
-#     c0 = slice_2ch[0].astype(np.float32)
-#     c1 = slice_2ch[1].astype(np.float32)
-
-#     c0_min, c0_max = c0.min(), c0.max()
-#     c1_min, c1_max = c1.min(), c1.max()
-
-#     # Map c1 to c0's value range
-#     if c1_max > c1_min:
-#         c1_mapped = (c1 - c1_min) / (c1_max - c1_min)  # [0, 1]
-#         c1_mapped = c1_mapped * (c0_max - c0_min) + c0_min
-#     else:
-#         # Constant channel fallback
-#         c1_mapped = np.full_like(c1, fill_value=c0_min)
-
-#     c2 = 0.5 * (c0 + c1_mapped)
-
-#     image = np.stack([c0, c1_mapped, c2], axis=-1).astype(np.float32)
+#     c0 = slice_2ch[0]
+#     c1 = slice_2ch[1]
+#     c2 = 0.5 * (c0 + c1)
+#     image = np.stack([c0, c1, c2], axis=-1).astype(np.float32)  # HWC
 #     return image
+
+
+# TODO: change to the following after new training scheme
+def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
+    """
+    slice_2ch: (2, H, W)
+    return: (H, W, 3) float32
+
+    channel0 = mod0
+    channel1 = mod1 mapped to mod0 value range
+    channel2 = average(channel0, channel1)
+    """
+    if slice_2ch.shape[0] != 2:
+        raise ValueError(f"Expected input shape (2, H, W), got {slice_2ch.shape}")
+
+    c0 = slice_2ch[0].astype(np.float32)
+    c1 = slice_2ch[1].astype(np.float32)
+
+    c0_min, c0_max = c0.min(), c0.max()
+    c1_min, c1_max = c1.min(), c1.max()
+
+    # Map c1 to c0's value range
+    if c1_max > c1_min:
+        c1_mapped = (c1 - c1_min) / (c1_max - c1_min)  # [0, 1]
+        c1_mapped = c1_mapped * (c0_max - c0_min) + c0_min
+    else:
+        # Constant channel fallback
+        c1_mapped = np.full_like(c1, fill_value=c0_min)
+
+    c2 = 0.5 * (c0 + c1_mapped)
+
+    image = np.stack([c0, c1_mapped, c2], axis=-1).astype(np.float32)
+    return image
 
 
 def preprocess_slice_like_val_transform(image_hwc: np.ndarray, output_size: int, device: torch.device):
