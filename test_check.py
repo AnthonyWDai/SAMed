@@ -68,11 +68,10 @@ def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
     channel1 = mod1
     channel2 = average(mod0, mod1)
     """
-    # TODO: revise to map the other channels to the first channel value range
     c0 = slice_2ch[0]
     c1 = slice_2ch[1]
     c2 = 0.5 * (c0 + c1)
-    image = np.stack([c0, c1, c2], axis=-1).astype(np.float32)
+    image = np.stack([c0, c1, c2], axis=-1).astype(np.float32)  # HWC
     return image
 
 
@@ -112,16 +111,25 @@ def normalize_to_uint8(arr: np.ndarray) -> np.ndarray:
 def save_grayscale_image(arr: np.ndarray, save_path: str):
     arr_uint8 = normalize_to_uint8(arr)
     img = Image.fromarray(arr_uint8, mode='L')
-    img.save(save_path)
+    ext = os.path.splitext(save_path)[1].lower()
+    if ext in ['.jpg', '.jpeg']:
+        img.save(save_path, quality=95)
+    else:
+        img.save(save_path)
 
 
 def save_rgb_image(arr: np.ndarray, save_path: str):
     """
     arr: (H, W, 3)
+    Save JPG/JPEG with quality=95.
     """
     arr_uint8 = normalize_to_uint8(arr)
     img = Image.fromarray(arr_uint8, mode='RGB')
-    img.save(save_path)
+    ext = os.path.splitext(save_path)[1].lower()
+    if ext in ['.jpg', '.jpeg']:
+        img.save(save_path, quality=95)
+    else:
+        img.save(save_path)
 
 
 def save_tensor_image(tensor_chw: torch.Tensor, save_path: str):
@@ -149,11 +157,11 @@ def export_case_images(
     output_dir,
     img_size,
     device,
-    save_ext="png"
+    save_ext="jpg"
 ):
     """
     Save outputs from:
-      1. preprocess_case_nnunet (modalities)
+      1. preprocess_case_nnunet (modalities) as .npy
       2. build_rgb_from_two_modalities
       3. preprocess_slice_like_val_transform
     """
@@ -163,8 +171,8 @@ def export_case_images(
     _, z, h, w = data.shape
 
     case_out_dir = os.path.join(output_dir, case_id)
-    mod0_dir = os.path.join(case_out_dir, "01_preprocess_case_nnunet_mod0")
-    mod1_dir = os.path.join(case_out_dir, "01_preprocess_case_nnunet_mod1")
+    mod0_dir = os.path.join(case_out_dir, "01_preprocess_case_nnunet_mod0_npy")
+    mod1_dir = os.path.join(case_out_dir, "01_preprocess_case_nnunet_mod1_npy")
     rgb_dir = os.path.join(case_out_dir, "02_build_rgb_from_two_modalities")
     valtf_dir = os.path.join(case_out_dir, "03_preprocess_slice_like_val_transform")
 
@@ -174,21 +182,22 @@ def export_case_images(
     for s in tqdm(range(z), desc=f"Exporting slices for {case_id}"):
         slice_2ch = data[:2, s]  # (2, H, W)
 
-        # Save preprocess_case_nnunet outputs
+        # Save preprocess_case_nnunet outputs as .npy
         mod0 = slice_2ch[0]
         mod1 = slice_2ch[1]
-        save_grayscale_image(mod0, os.path.join(mod0_dir, f"slice_{s:04d}.{save_ext}"))
-        save_grayscale_image(mod1, os.path.join(mod1_dir, f"slice_{s:04d}.{save_ext}"))
+        np.save(os.path.join(mod0_dir, f"slice_{s:04d}.npy"), mod0)
+        np.save(os.path.join(mod1_dir, f"slice_{s:04d}.npy"), mod1)
 
-        # Save build_rgb_from_two_modalities output
+        # Save build_rgb_from_two_modalities output as JPG with quality=95
         image_hwc = build_rgb_from_two_modalities(slice_2ch)
-        save_rgb_image(image_hwc, os.path.join(rgb_dir, f"slice_{s:04d}.{save_ext}"))
+        rgb_save_path = os.path.join(rgb_dir, f"slice_{s:04d}.jpg")
+        save_rgb_image(image_hwc, rgb_save_path)
 
         # Save preprocess_slice_like_val_transform output
-        x = preprocess_slice_like_val_transform(image_hwc, img_size, device)  # (1,3,H,W)
+        x = preprocess_slice_like_val_transform(image_hwc, img_size, device)  # (1, 3, H, W)
         save_tensor_image(x[0], os.path.join(valtf_dir, f"slice_{s:04d}.{save_ext}"))
 
-    logging.info(f"Saved exported images for case: {case_id}")
+    logging.info(f"Saved exported images and npy arrays for case: {case_id}")
 
 
 def export_on_folder(args):
@@ -252,10 +261,10 @@ def build_argparser():
 
     parser.add_argument('--device', type=str, default='cpu',
                         help='cuda / cpu / mps')
-    parser.add_argument('--save_ext', type=str, default='png', choices=['png', 'jpg', 'jpeg'],
-                        help='Image format for exported slices')
+    parser.add_argument('--save_ext', type=str, default='jpg', choices=['png', 'jpg', 'jpeg'],
+                        help='Image format for exported validation slices')
     parser.add_argument('--max_cases', type=int, default=5,
-                    help='Number of 3D cases to process')
+                        help='Number of 3D cases to process')
 
     return parser
 
@@ -313,5 +322,5 @@ if __name__ == '__main__':
     # --configuration 2d \
     # --img_size 512 \
     # --device cpu \
-    # --save_ext png
+    # --save_ext jpg
     main()

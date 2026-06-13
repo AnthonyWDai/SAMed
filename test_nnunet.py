@@ -89,6 +89,38 @@ def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
     return image
 
 
+# def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
+#     """
+#     slice_2ch: (2, H, W)
+#     return: (H, W, 3) float32
+
+#     channel0 = mod0
+#     channel1 = mod1 mapped to mod0 value range
+#     channel2 = average(channel0, channel1)
+#     """
+#     if slice_2ch.shape[0] != 2:
+#         raise ValueError(f"Expected input shape (2, H, W), got {slice_2ch.shape}")
+
+#     c0 = slice_2ch[0].astype(np.float32)
+#     c1 = slice_2ch[1].astype(np.float32)
+
+#     c0_min, c0_max = c0.min(), c0.max()
+#     c1_min, c1_max = c1.min(), c1.max()
+
+#     # Map c1 to c0's value range
+#     if c1_max > c1_min:
+#         c1_mapped = (c1 - c1_min) / (c1_max - c1_min)  # [0, 1]
+#         c1_mapped = c1_mapped * (c0_max - c0_min) + c0_min
+#     else:
+#         # Constant channel fallback
+#         c1_mapped = np.full_like(c1, fill_value=c0_min)
+
+#     c2 = 0.5 * (c0 + c1_mapped)
+
+#     image = np.stack([c0, c1_mapped, c2], axis=-1).astype(np.float32)
+#     return image
+
+
 def preprocess_slice_like_val_transform(image_hwc: np.ndarray, output_size: int, device: torch.device):
     """
     Match your ValTransform behavior as closely as possible:
@@ -191,6 +223,7 @@ def predict_case_with_samed_preprocessed(
     for s in tqdm(range(z), desc="Predicting slices"):
         slice_2ch = data[:2, s]  # (2, H, W)
 
+        # preprocess from rgb conversion is correct
         image_hwc = build_rgb_from_two_modalities(slice_2ch)
         x = preprocess_slice_like_val_transform(image_hwc, img_size, device)
 
@@ -246,6 +279,7 @@ def inference_on_folder(args):
         case_id = os.path.basename(case_files[0]).replace("_0000.nii.gz", "")
         logging.info(f"Processing case: {case_id}")
 
+        # preprocess from nnunet is correct
         data, data_properties = preprocess_case_nnunet(
             case_files,
             plans_manager,
@@ -301,7 +335,7 @@ def build_argparser():
                         help='Current task: use 1 for binary. Multiclass supported later')
     parser.add_argument('--img_size', type=int, default=512,
                         help='Resize size matching validation transform output_size')
-    parser.add_argument('--input_size', type=int, default=224,
+    parser.add_argument('--input_size', type=int, default=512,
                         help='Size argument passed into SAMed forward')
     parser.add_argument('--seed', type=int, default=1234)
     parser.add_argument('--deterministic', type=int, default=1)
