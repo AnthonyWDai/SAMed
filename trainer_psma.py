@@ -263,7 +263,7 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
 
         loss, loss_ce, loss_dice = calc_loss(
             outputs,
-            low_res_label_batch,
+            label_batch,
             ce_loss,
             dice_loss,
             args.dice_param,
@@ -424,7 +424,7 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
             loss, loss_ce, loss_dice = calc_loss(
                 outputs,
-                low_res_label_batch,
+                label_batch,
                 ce_loss,
                 dice_loss,
                 args.dice_param,
