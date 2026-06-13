@@ -9,7 +9,6 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -104,7 +103,8 @@ def update_learning_rate(optimizer, base_lr, iter_num, max_iterations, warmup, w
     else:
         shift_iter = iter_num - warmup_period if warmup else iter_num
         effective_max_iterations = max(1, max_iterations - warmup_period) if warmup else max_iterations
-        lr = base_lr * (1.0 - shift_iter / effective_max_iterations) ** 0.9
+        progress = min(max(shift_iter / effective_max_iterations, 0.0), 1.0)
+        lr = base_lr * (1.0 - progress) ** 0.9
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
@@ -139,7 +139,6 @@ def compute_seg_dice_stats(pred, target, num_classes, eps=1e-5):
         denom = pred_sum + target_sum
 
         valid = denom > 0
-
         if valid.any():
             dice = (2.0 * intersect[valid] + eps) / (denom[valid] + eps)
             dice_sum += dice.sum().item()
@@ -150,8 +149,7 @@ def compute_seg_dice_stats(pred, target, num_classes, eps=1e-5):
 
 def _extract_mask_from_sample(sample):
     """
-    Helper for class-weight computation before DataLoader transforms batching.
-
+    Helper for class-weight computation before DataLoader batching.
     Expected dataset item:
       - dict with "label" key
       - or tuple/list where mask is second item
@@ -170,19 +168,16 @@ def _extract_mask_from_sample(sample):
         raise TypeError("Unsupported dataset sample format for mask extraction")
 
     mask = torch.as_tensor(mask)
-
     if mask.dim() == 3 and mask.size(0) == 1:
         mask = mask.squeeze(0)
-
     if mask.dim() != 2:
         raise ValueError(f"Expected mask with shape [H, W] or [1, H, W], got {tuple(mask.shape)}")
-
     return mask.long()
 
 
 def compute_class_pixel_counts(dataset, num_classes_total):
     """
-    Computes per-class pixel counts over the TRAINING dataset.
+    Computes per-class pixel counts over the training dataset.
 
     num_classes_total:
         total number of label ids including background.
@@ -192,17 +187,14 @@ def compute_class_pixel_counts(dataset, num_classes_total):
           => num_classes_total = args.num_classes + 1
     """
     counts = torch.zeros(num_classes_total, dtype=torch.long)
-
     for idx in tqdm(range(len(dataset)), desc="Computing class pixel counts", ncols=80):
         sample = dataset[idx]
         mask = _extract_mask_from_sample(sample)
-
         vals, cnts = torch.unique(mask, return_counts=True)
         valid = (vals >= 0) & (vals < num_classes_total)
         vals = vals[valid]
         cnts = cnts[valid]
         counts[vals] += cnts.cpu()
-
     return counts
 
 
@@ -243,6 +235,70 @@ def make_ce_weights_inverse_sqrt(
     return weights
 
 
+def get_class_weights_csv_path(root_path):
+    return os.path.join(root_path, "class_weights.csv")
+
+
+def save_class_weights_csv(csv_path, class_counts, class_weights):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["class_id", "pixel_count", "weight"])
+        for class_id, (cnt, w) in enumerate(zip(class_counts.tolist(), class_weights.tolist())):
+            writer.writerow([class_id, int(cnt), float(w)])
+
+
+def load_class_weights_csv(csv_path, num_classes_total):
+    class_counts = torch.zeros(num_classes_total, dtype=torch.long)
+    class_weights = torch.zeros(num_classes_total, dtype=torch.float32)
+
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    if len(rows) != num_classes_total:
+        raise ValueError(
+            f"Class weight CSV at {csv_path} has {len(rows)} rows, "
+            f"but expected {num_classes_total} classes."
+        )
+
+    for row in rows:
+        class_id = int(row["class_id"])
+        if class_id < 0 or class_id >= num_classes_total:
+            raise ValueError(f"Invalid class_id={class_id} in {csv_path}")
+
+        class_counts[class_id] = int(float(row["pixel_count"]))
+        class_weights[class_id] = float(row["weight"])
+
+    return class_counts, class_weights
+
+
+def get_or_create_class_weights(root_path, train_dataset, num_classes_total, args):
+    csv_path = get_class_weights_csv_path(root_path)
+    force_recompute = getattr(args, "recompute_class_weights", False)
+
+    if os.path.exists(csv_path) and not force_recompute:
+        logging.info(f"Found existing class weights CSV: {csv_path}. Loading without recomputation.")
+        class_counts, class_weights = load_class_weights_csv(csv_path, num_classes_total)
+    else:
+        if force_recompute and os.path.exists(csv_path):
+            logging.info(f"Recomputing class weights despite existing CSV: {csv_path}")
+        else:
+            logging.info(f"No class weights CSV found at {csv_path}. Computing class weights.")
+
+        class_counts = compute_class_pixel_counts(train_dataset, num_classes_total)
+        class_weights = make_ce_weights_inverse_sqrt(
+            class_counts,
+            clamp_max=getattr(args, "ce_weight_clamp_max", 5.0),
+            normalize=True,
+            background_scale=getattr(args, "ce_background_scale", 1.0),
+        )
+        save_class_weights_csv(csv_path, class_counts, class_weights)
+        logging.info(f"Saved class weights CSV to: {csv_path}")
+
+    return class_counts, class_weights
+
+
 @torch.no_grad()
 def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
     model.eval()
@@ -257,10 +313,8 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
     for sampled_batch in valloader:
         image_batch = sampled_batch["image"].cuda(non_blocking=True)
         label_batch = sampled_batch["label"].cuda(non_blocking=True)
-        low_res_label_batch = sampled_batch["low_res_label"].cuda(non_blocking=True)
 
         outputs = model(image_batch, multimask_output, args.img_size)
-
         loss, loss_ce, loss_dice = calc_loss(
             outputs,
             label_batch,
@@ -272,7 +326,6 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
         pred_masks = outputs["masks"]
         pred_masks = torch.argmax(torch.softmax(pred_masks, dim=1), dim=1)
 
-        # Make sure pred_masks and label_batch have the same spatial size.
         dice_sum, dice_count = compute_seg_dice_stats(
             pred_masks,
             label_batch,
@@ -344,17 +397,12 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
     print(f"The length of train set is: {len(train_dataset)}")
     print(f"The length of val set is: {len(val_dataset)}")
 
-    # ------------------------------------------------------------
-    # Compute class weights from training dataset
-    # ------------------------------------------------------------
-    class_counts = compute_class_pixel_counts(train_dataset, num_classes_total)
-    class_weights = make_ce_weights_inverse_sqrt(
-        class_counts,
-        clamp_max=getattr(args, "ce_weight_clamp_max", 5.0),
-        normalize=True,
-        background_scale=getattr(args, "ce_background_scale", 1.0),
+    class_counts, class_weights = get_or_create_class_weights(
+        root_path=args.root_path,
+        train_dataset=train_dataset,
+        num_classes_total=num_classes_total,
+        args=args,
     )
-
     logging.info(f"class pixel counts: {class_counts.tolist()}")
     logging.info(f"class CE weights: {class_weights.tolist()}")
 
@@ -395,7 +443,6 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
     writer = SimpleWriter(os.path.join(snapshot_path, "log"))
 
-    # save class weights to log
     for c, (cnt, w) in enumerate(zip(class_counts.tolist(), class_weights.tolist())):
         writer.add_scalar(f"class_stats/count_class_{c}", cnt, 0)
         writer.add_scalar(f"class_stats/weight_class_{c}", w, 0)
@@ -409,7 +456,6 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
     logging.info(f"{len(trainloader)} iterations per epoch. {max_iterations} max iterations")
 
     epoch_iterator = tqdm(range(max_epoch), ncols=70)
-
     for epoch_num in epoch_iterator:
         model.train()
 
@@ -442,7 +488,6 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
                 warmup=args.warmup,
                 warmup_period=args.warmup_period,
             )
-
             iter_num += 1
 
             weighted_ce = (1.0 - args.dice_param) * loss_ce.item()
