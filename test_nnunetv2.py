@@ -74,22 +74,6 @@ def preprocess_case_nnunet(case_files, plans_manager, configuration_manager, dat
     return data, data_properties
 
 
-# def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
-#     """
-#     slice_2ch: (2, H, W)
-#     return: (H, W, 3) float32
-#     channel0 = mod0
-#     channel1 = mod1
-#     channel2 = average(mod0, mod1)
-#     """
-#     c0 = slice_2ch[0]
-#     c1 = slice_2ch[1]
-#     c2 = 0.5 * (c0 + c1)
-#     image = np.stack([c0, c1, c2], axis=-1).astype(np.float32)  # HWC
-#     return image
-
-
-# TODO: change to the following after new training scheme
 def build_rgb_from_two_modalities(slice_2ch: np.ndarray) -> np.ndarray:
     """
     slice_2ch: (2, H, W)
