@@ -256,7 +256,6 @@ def build_argparser():
 
     parser.add_argument('--img_size', type=int, default=512,
                         help='Resize size matching validation transform output_size')
-    parser.add_argument('--seed', type=int, default=1234)
     parser.add_argument('--deterministic', type=int, default=1)
 
     parser.add_argument('--device', type=str, default='cpu',
@@ -290,12 +289,6 @@ def main():
     else:
         cudnn.benchmark = False
         cudnn.deterministic = True
-
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
 
     os.makedirs(args.output_dir, exist_ok=True)
 

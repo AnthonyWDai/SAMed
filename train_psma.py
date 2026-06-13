@@ -149,6 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.8,
         help="Weight for Dice-related loss term.",
     )
+    parser.add_argument("--ce_weight_clamp_max", type=float, default=5.0)
+    parser.add_argument("--ce_background_scale", type=float, default=0.5)
 
     return parser
 

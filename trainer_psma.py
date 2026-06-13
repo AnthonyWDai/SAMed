@@ -1,21 +1,22 @@
 import argparse
+import csv
 import logging
 import os
 import random
 import sys
-import csv
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
-from utils import DiceLossV2
 
+from utils import DiceLossV2
 from datasets.dataset_psmav2 import PSMADataset, TrainTransform, ValTransform
 
 
@@ -30,7 +31,6 @@ class SimpleWriter:
 
         self._scalar_fp = open(self.scalar_file, "a", newline="")
         self._scalar_writer = csv.writer(self._scalar_fp)
-
         if self.scalar_file.stat().st_size == 0:
             self._scalar_writer.writerow(["tag", "step", "value"])
 
@@ -49,10 +49,8 @@ class SimpleWriter:
         save_path = self.image_dir / f"{safe_tag}_step_{step}.png"
 
         img = image_tensor.detach().cpu()
-
         if img.dim() == 2:
             img = img.unsqueeze(0)
-
         if img.dtype != torch.float32:
             img = img.float()
 
@@ -68,10 +66,10 @@ class SimpleWriter:
             self._scalar_fp = None
 
 
-def calc_loss(outputs, low_res_labels, ce_loss, dice_loss, dice_weight: float = 0.8):
-    pre_masks = outputs["masks"] # outputs["low_res_logits"]
-    loss_ce = ce_loss(pre_masks, low_res_labels.long())
-    loss_dice = dice_loss(pre_masks, low_res_labels)
+def calc_loss(outputs, target_labels, ce_loss, dice_loss, dice_weight: float = 0.8):
+    pred_logits = outputs["masks"]
+    loss_ce = ce_loss(pred_logits, target_labels.long())
+    loss_dice = dice_loss(pred_logits, target_labels)
     total_loss = (1.0 - dice_weight) * loss_ce + dice_weight * loss_dice
     return total_loss, loss_ce, loss_dice
 
@@ -107,6 +105,7 @@ def update_learning_rate(optimizer, base_lr, iter_num, max_iterations, warmup, w
         shift_iter = iter_num - warmup_period if warmup else iter_num
         effective_max_iterations = max(1, max_iterations - warmup_period) if warmup else max_iterations
         lr = base_lr * (1.0 - shift_iter / effective_max_iterations) ** 0.9
+
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
     return lr
@@ -114,7 +113,7 @@ def update_learning_rate(optimizer, base_lr, iter_num, max_iterations, warmup, w
 
 def compute_seg_dice(pred, target, num_classes, eps=1e-5):
     """
-    pred: [B, H, W] predicted class ids
+    pred:   [B, H, W] predicted class ids
     target: [B, H, W] ground truth class ids
 
     Returns mean Dice across foreground classes [1..num_classes].
@@ -136,16 +135,112 @@ def compute_seg_dice(pred, target, num_classes, eps=1e-5):
         dice = torch.where(
             denom > 0,
             (2.0 * intersect + eps) / (denom + eps),
-            torch.ones_like(denom)
+            torch.ones_like(denom),
         )
         dices.append(dice.mean())
 
     return torch.stack(dices).mean().item()
 
 
+def _extract_mask_from_sample(sample):
+    """
+    Helper for class-weight computation before DataLoader transforms batching.
+
+    Expected dataset item:
+      - dict with "label" key
+      - or tuple/list where mask is second item
+
+    Mask shape:
+      - [H, W]
+      - [1, H, W]
+    """
+    if isinstance(sample, dict):
+        if "label" not in sample:
+            raise KeyError("Dataset sample dict must contain key 'label'")
+        mask = sample["label"]
+    elif isinstance(sample, (tuple, list)) and len(sample) >= 2:
+        mask = sample[1]
+    else:
+        raise TypeError("Unsupported dataset sample format for mask extraction")
+
+    mask = torch.as_tensor(mask)
+
+    if mask.dim() == 3 and mask.size(0) == 1:
+        mask = mask.squeeze(0)
+
+    if mask.dim() != 2:
+        raise ValueError(f"Expected mask with shape [H, W] or [1, H, W], got {tuple(mask.shape)}")
+
+    return mask.long()
+
+
+def compute_class_pixel_counts(dataset, num_classes_total):
+    """
+    Computes per-class pixel counts over the TRAINING dataset.
+
+    num_classes_total:
+        total number of label ids including background.
+        Example:
+          foreground classes = args.num_classes
+          background = 1
+          => num_classes_total = args.num_classes + 1
+    """
+    counts = torch.zeros(num_classes_total, dtype=torch.long)
+
+    for idx in tqdm(range(len(dataset)), desc="Computing class pixel counts", ncols=80):
+        sample = dataset[idx]
+        mask = _extract_mask_from_sample(sample)
+
+        vals, cnts = torch.unique(mask, return_counts=True)
+        valid = (vals >= 0) & (vals < num_classes_total)
+        vals = vals[valid]
+        cnts = cnts[valid]
+        counts[vals] += cnts.cpu()
+
+    return counts
+
+
+def make_ce_weights_inverse_sqrt(
+    counts,
+    clamp_max=5.0,
+    normalize=True,
+    background_scale=1.0,
+    eps=1e-6,
+):
+    """
+    Stable segmentation class weights:
+        w_c = 1 / sqrt(count_c)
+
+    Then optionally:
+      - downweight background
+      - clamp max
+      - normalize mean weight to ~1
+    """
+    counts = counts.float()
+    weights = torch.zeros_like(counts)
+
+    nonzero = counts > 0
+    weights[nonzero] = 1.0 / torch.sqrt(counts[nonzero] + eps)
+
+    # background assumed class 0
+    if len(weights) > 0:
+        weights[0] = weights[0] * background_scale
+
+    if clamp_max is not None:
+        weights = torch.clamp(weights, max=clamp_max)
+
+    if normalize:
+        nz = weights > 0
+        if nz.any():
+            weights[nz] = weights[nz] / weights[nz].mean()
+
+    return weights
+
+
 @torch.no_grad()
 def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
     model.eval()
+
     val_loss_total = 0.0
     val_ce_total = 0.0
     val_dice_loss_total = 0.0
@@ -153,14 +248,16 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
     num_batches = 0
 
     for sampled_batch in valloader:
-        image_batch = sampled_batch["image"].cuda()
-        label_batch = sampled_batch["label"].cuda()
-        low_res_label_batch = sampled_batch["low_res_label"].cuda()
+        image_batch = sampled_batch["image"].cuda(non_blocking=True)
+        label_batch = sampled_batch["label"].cuda(non_blocking=True)
+        low_res_label_batch = sampled_batch["low_res_label"].cuda(non_blocking=True)
 
         outputs = model(image_batch, multimask_output, args.img_size)
+
+        # loss should be computed against the same resolution used by model output
         loss, loss_ce, loss_dice = calc_loss(
             outputs,
-            label_batch,
+            low_res_label_batch,
             ce_loss,
             dice_loss,
             args.dice_param,
@@ -169,7 +266,9 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
         pred_masks = outputs["masks"]
         pred_masks = torch.argmax(torch.softmax(pred_masks, dim=1), dim=1)
 
-        # TODO: ignore_index
+        # If output masks are low-res and label_batch is full-res, this assumes
+        # your model/transform pipeline returns matching resolution here.
+        # If not, resize prediction before metric computation.
         batch_dice = compute_seg_dice(
             pred_masks,
             label_batch,
@@ -195,6 +294,7 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
 
 def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
     os.makedirs(snapshot_path, exist_ok=True)
+
     logging.basicConfig(
         filename=os.path.join(snapshot_path, "log.txt"),
         level=logging.INFO,
@@ -209,6 +309,7 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
     max_epoch = args.max_epochs
     stop_epoch = args.stop_epoch
     num_classes = args.num_classes
+    num_classes_total = num_classes + 1  # include background
 
     train_dataset = PSMADataset(
         base_dir=args.root_path,
@@ -234,6 +335,20 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
     print(f"The length of train set is: {len(train_dataset)}")
     print(f"The length of val set is: {len(val_dataset)}")
+
+    # ------------------------------------------------------------
+    # Compute class weights from training dataset
+    # ------------------------------------------------------------
+    class_counts = compute_class_pixel_counts(train_dataset, num_classes_total)
+    class_weights = make_ce_weights_inverse_sqrt(
+        class_counts,
+        clamp_max=getattr(args, "ce_weight_clamp_max", 5.0),
+        normalize=True,
+        background_scale=getattr(args, "ce_background_scale", 1.0),
+    )
+
+    logging.info(f"class pixel counts: {class_counts.tolist()}")
+    logging.info(f"class CE weights: {class_weights.tolist()}")
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -261,16 +376,21 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
     model.train()
 
-    ce_loss = CrossEntropyLoss()
+    ce_loss = CrossEntropyLoss(weight=class_weights.cuda())
     dice_loss = DiceLossV2(
-        num_classes + 1,
-        include_background=True if num_classes == 1 else False
+        num_classes_total,
+        include_background=True if num_classes == 1 else False,
     )
 
     initial_lr = base_lr / args.warmup_period if args.warmup else base_lr
     optimizer = set_optimizer(args, model, initial_lr)
 
     writer = SimpleWriter(os.path.join(snapshot_path, "log"))
+
+    # save class weights to log
+    for c, (cnt, w) in enumerate(zip(class_counts.tolist(), class_weights.tolist())):
+        writer.add_scalar(f"class_stats/count_class_{c}", cnt, 0)
+        writer.add_scalar(f"class_stats/weight_class_{c}", w, 0)
 
     iter_num = 0
     max_iterations = max_epoch * len(trainloader)
@@ -286,13 +406,14 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
         model.train()
 
         for _, sampled_batch in enumerate(trainloader):
-            image_batch = sampled_batch["image"].cuda()
-            label_batch = sampled_batch["label"].cuda()
-            low_res_label_batch = sampled_batch["low_res_label"].cuda()
+            image_batch = sampled_batch["image"].cuda(non_blocking=True)
+            label_batch = sampled_batch["label"].cuda(non_blocking=True)
+            low_res_label_batch = sampled_batch["low_res_label"].cuda(non_blocking=True)
 
             assert image_batch.max() <= 3, f"image_batch max: {image_batch.max()}"
 
             outputs = model(image_batch, multimask_output, args.img_size)
+
             loss, loss_ce, loss_dice = calc_loss(
                 outputs,
                 low_res_label_batch,
@@ -316,17 +437,25 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
             iter_num += 1
 
+            weighted_ce = (1.0 - args.dice_param) * loss_ce.item()
+            weighted_dice = args.dice_param * loss_dice.item()
+
             writer.add_scalar("info/lr", lr_, iter_num)
             writer.add_scalar("train/total_loss", loss.item(), iter_num)
             writer.add_scalar("train/loss_ce", loss_ce.item(), iter_num)
             writer.add_scalar("train/loss_dice", loss_dice.item(), iter_num)
+            writer.add_scalar("train/weighted_loss_ce", weighted_ce, iter_num)
+            writer.add_scalar("train/weighted_loss_dice", weighted_dice, iter_num)
+            writer.add_scalar("train/soft_dice_score", 1.0 - loss_dice.item(), iter_num)
 
             logging.info(
-                "iteration %d : loss : %f, loss_ce: %f, loss_dice: %f",
+                "iteration %d : loss=%f, loss_ce=%f, loss_dice=%f, weighted_ce=%f, weighted_dice=%f",
                 iter_num,
                 loss.item(),
                 loss_ce.item(),
                 loss_dice.item(),
+                weighted_ce,
+                weighted_dice,
             )
 
             if iter_num % 1000 == 0 and image_batch.shape[0] > 1:
