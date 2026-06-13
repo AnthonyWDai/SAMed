@@ -180,11 +180,11 @@ def ensure_export_compatible_logits(predicted_logits: torch.Tensor, num_classes:
     c = predicted_logits.shape[0]
 
     if num_classes == 1:
-        if c == 1:
-            fg = predicted_logits
-            bg = -fg
-            predicted_logits = torch.cat([bg, fg], dim=0)
-        elif c == 2:
+        # if c == 1:
+            # fg = predicted_logits
+            # bg = -fg
+            # predicted_logits = torch.cat([bg, fg], dim=0)
+        if c == 2:
             pass
         else:
             raise RuntimeError(f"Binary task but model returned {c} channels.")

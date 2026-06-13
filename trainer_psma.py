@@ -69,9 +69,9 @@ class SimpleWriter:
 
 
 def calc_loss(outputs, low_res_labels, ce_loss, dice_loss, dice_weight: float = 0.8):
-    low_res_logits = outputs["low_res_logits"]
-    loss_ce = ce_loss(low_res_logits, low_res_labels.long())
-    loss_dice = dice_loss(low_res_logits, low_res_labels)
+    pre_masks = outputs["masks"] # outputs["low_res_logits"]
+    loss_ce = ce_loss(pre_masks, low_res_labels.long())
+    loss_dice = dice_loss(pre_masks, low_res_labels)
     total_loss = (1.0 - dice_weight) * loss_ce + dice_weight * loss_dice
     return total_loss, loss_ce, loss_dice
 
@@ -160,7 +160,7 @@ def validate_psma(args, model, valloader, ce_loss, dice_loss, multimask_output):
         outputs = model(image_batch, multimask_output, args.img_size)
         loss, loss_ce, loss_dice = calc_loss(
             outputs,
-            low_res_label_batch,
+            label_batch,
             ce_loss,
             dice_loss,
             args.dice_param,
