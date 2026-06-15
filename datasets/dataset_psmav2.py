@@ -64,10 +64,10 @@ class TrainTransform(object):
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
-        if random.random() > 0.5:
-            image, label = random_rot_flip(image, label)
-        elif random.random() > 0.5:
-            image, label = random_rotate(image, label)
+        # if random.random() > 0.5:
+        #     image, label = random_rot_flip(image, label)
+        # elif random.random() > 0.5:
+        #     image, label = random_rotate(image, label)
 
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
