@@ -449,7 +449,7 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
 
     iter_num = 0
     max_iterations = max_epoch * len(trainloader)
-    save_interval = 20
+    save_interval = int(0.1 * max_epoch)
     val_interval = getattr(args, "val_interval", save_interval)
     best_val_dice = -1.0
 
