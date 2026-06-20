@@ -121,6 +121,7 @@ if __name__ == '__main__':
 
     assert args.lora_ckpt is not None
     net.load_lora_parameters(args.lora_ckpt)
+    net = net.cuda()
 
     if args.num_classes > 1:
         multimask_output = True
