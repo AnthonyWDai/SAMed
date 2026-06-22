@@ -372,7 +372,7 @@ def image_to_tensor(image):
 # ----------------------------
 # Train / val transforms
 # ----------------------------
-class TrainTransformWholeBodyLesion(object):
+class TrainTransform(object):
     def __init__(
         self,
         output_size,
@@ -507,7 +507,7 @@ class TrainTransformWholeBodyLesion(object):
         }
 
 
-class ValTransformWholeBodyLesion(object):
+class ValTransform(object):
     def __init__(self, output_size, low_res):
         self.output_size = tuple(output_size)
         self.low_res = tuple(low_res)
