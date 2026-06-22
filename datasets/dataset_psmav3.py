@@ -285,13 +285,13 @@ class TrainTransform(object):
         p_random_crop=1.0,
         p_rotation=0.5,
         p_scaling=0.5,
-        p_elastic=0.2,
+        p_elastic=0.1,
         p_mirroring=0.5,
         # intensity probabilities
         p_gaussian_noise=0.15,
         p_gaussian_blur=0.15,
         p_brightness_contrast=0.1,
-        p_gamma=0.3,
+        p_gamma=0.2,
         # parameter ranges
         crop_size=None,
         foreground_oversample_prob=0.8,
