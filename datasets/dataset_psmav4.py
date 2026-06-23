@@ -379,21 +379,21 @@ class TrainTransform(object):
         low_res,
         # sampling
         crop_size=None,
-        p_random_crop=1.0,
+        p_random_crop=0.1,
         foreground_oversample_prob=0.9,
         lesion_dilation_radius=5,
         # spatial probabilities
-        p_rotation=0.4,
-        p_scaling=0.3,
+        p_rotation=0.3,
+        p_scaling=0.05,
         p_elastic=0.0,   # default off for small lesions
         p_mirroring=0.,
         # intensity probabilities
-        p_gaussian_noise=0.10,
-        p_gaussian_blur=0.08,
-        p_brightness_contrast=0.10,
-        p_gamma=0.10,
+        p_gaussian_noise=0.05,
+        p_gaussian_blur=0.05,
+        p_brightness_contrast=0.05,
+        p_gamma=0.05,
         # parameter ranges
-        rotation_range=(-7, 7),
+        rotation_range=(-5, 5),
         scale_range=(0.9, 1.1),
         anisotropic_scale=False,
         elastic_alpha=6.0,
