@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from PIL import Image
 from scipy import ndimage
-from scipy.ndimage import zoom, gaussian_filter, map_coordinates
+from scipy.ndimage import zoom, gaussian_filter, map_coordinates, binary_dilation
 from torch.utils.data import Dataset
 from torchvision import transforms as T1
 
@@ -16,14 +16,19 @@ IMG_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 # ----------------------------
 # Basic spatial helpers
 # ----------------------------
-def random_rotate(image, label, angle_range=(-30, 30)):
+def random_rotate(image, label, angle_range=(-7, 7)):
     """
     image: HWC
     label: HW
+    Small-angle rotation to avoid destroying tiny lesions.
     """
     angle = np.random.uniform(angle_range[0], angle_range[1])
-    image = ndimage.rotate(image, angle, axes=(0, 1), order=1, reshape=False, mode="nearest")
-    label = ndimage.rotate(label, angle, order=0, reshape=False, mode="nearest")
+    image = ndimage.rotate(
+        image, angle, axes=(0, 1), order=1, reshape=False, mode="nearest"
+    )
+    label = ndimage.rotate(
+        label, angle, order=0, reshape=False, mode="nearest"
+    )
     return image, label
 
 
@@ -39,9 +44,10 @@ def random_mirror(image, label):
     return image, label
 
 
-def random_scale(image, label, scale_range=(0.7, 1.4), anisotropic=False):
+def random_scale(image, label, scale_range=(0.9, 1.1), anisotropic=False):
     """
     Random scaling then resize back to original size.
+    Conservative scaling for small-lesion preservation.
     image: HWC
     label: HW
     """
@@ -54,8 +60,11 @@ def random_scale(image, label, scale_range=(0.7, 1.4), anisotropic=False):
         s = np.random.uniform(scale_range[0], scale_range[1])
         sy, sx = s, s
 
-    scaled_img = zoom(image, (sy, sx, 1), order=1)
-    scaled_lbl = zoom(label, (sy, sx), order=0)
+    new_h = max(1, int(round(h * sy)))
+    new_w = max(1, int(round(w * sx)))
+
+    scaled_img = _resize_image(image, (new_h, new_w))
+    scaled_lbl = _resize_label(label, (new_h, new_w))
 
     scaled_img = _fit_to_size_image(scaled_img, (h, w))
     scaled_lbl = _fit_to_size_label(scaled_lbl, (h, w))
@@ -63,9 +72,10 @@ def random_scale(image, label, scale_range=(0.7, 1.4), anisotropic=False):
     return scaled_img, scaled_lbl
 
 
-def elastic_deformation(image, label, alpha=20.0, sigma=4.0):
+def elastic_deformation(image, label, alpha=6.0, sigma=8.0):
     """
-    2D elastic deformation.
+    Very mild 2D elastic deformation.
+    For small-lesion tasks this should generally be low-probability or disabled.
     image: HWC
     label: HW
     """
@@ -77,7 +87,7 @@ def elastic_deformation(image, label, alpha=20.0, sigma=4.0):
     x, y = np.meshgrid(np.arange(w), np.arange(h))
     indices = (y + dy, x + dx)
 
-    deformed_img = np.empty_like(image)
+    deformed_img = np.empty_like(image, dtype=np.float32)
     for c in range(image.shape[2]):
         deformed_img[..., c] = map_coordinates(
             image[..., c],
@@ -91,14 +101,23 @@ def elastic_deformation(image, label, alpha=20.0, sigma=4.0):
     return deformed_img, deformed_lbl
 
 
-def random_crop(image, label, crop_size, foreground_oversample_prob=0.0):
+def random_crop_lesion_aware(
+    image,
+    label,
+    crop_size,
+    foreground_oversample_prob=0.9,
+    lesion_dilation_radius=5,
+    force_all_fg_classes=False,
+):
     """
     image: HWC
     label: HW
     crop_size: (crop_h, crop_w)
 
-    If foreground oversampling is triggered and foreground exists,
-    choose crop center around a foreground pixel.
+    Lesion-aware crop:
+    - with probability foreground_oversample_prob, sample crop around lesion
+    - optionally dilate lesion map so tiny lesions get contextual sampling
+    - if no foreground exists, fallback to random crop
     """
     h, w = label.shape
     crop_h, crop_w = crop_size
@@ -109,10 +128,26 @@ def random_crop(image, label, crop_size, foreground_oversample_prob=0.0):
         h, w = label.shape
 
     use_fg = random.random() < foreground_oversample_prob
-    fg_coords = np.argwhere(label > 0)
 
-    if use_fg and len(fg_coords) > 0:
+    if use_fg:
+        fg_mask = label > 0
+
+        if lesion_dilation_radius > 0 and fg_mask.any():
+            structure = np.ones((2 * lesion_dilation_radius + 1, 2 * lesion_dilation_radius + 1), dtype=bool)
+            fg_mask = binary_dilation(fg_mask, structure=structure)
+
+        fg_coords = np.argwhere(fg_mask)
+    else:
+        fg_coords = np.empty((0, 2), dtype=np.int64)
+
+    if len(fg_coords) > 0:
         cy, cx = fg_coords[np.random.randint(len(fg_coords))]
+        # add random offset so crop is not always lesion-centered
+        offset_y = np.random.randint(-crop_h // 6, crop_h // 6 + 1)
+        offset_x = np.random.randint(-crop_w // 6, crop_w // 6 + 1)
+        cy = np.clip(cy + offset_y, 0, h - 1)
+        cx = np.clip(cx + offset_x, 0, w - 1)
+
         y1 = max(0, cy - crop_h // 2)
         x1 = max(0, cx - crop_w // 2)
         y1 = min(y1, h - crop_h)
@@ -132,48 +167,69 @@ def random_crop(image, label, crop_size, foreground_oversample_prob=0.0):
 # ----------------------------
 # Intensity transforms
 # ----------------------------
-def add_gaussian_noise(image, std_range=(0.0, 0.05)):
+def add_gaussian_noise(image, std_range=(0.0, 0.02)):
     """
-    image expected in [0, 255] uint8 or float-like image.
-    Applied in float32, returned as float32 in [0, 255].
+    Mild noise for small-lesion preservation.
+    Works on float or uint8-like inputs.
+    Returns float32 in original dynamic range assumption [0, 255] if image.max()>1.5,
+    otherwise approximately [0, 1].
     """
     img = image.astype(np.float32)
-    std = np.random.uniform(std_range[0], std_range[1]) * 255.0
+    scale = 255.0 if img.max() > 1.5 else 1.0
+    std = np.random.uniform(std_range[0], std_range[1]) * scale
     noise = np.random.normal(0, std, img.shape).astype(np.float32)
-    img = np.clip(img + noise, 0, 255)
+    img = np.clip(img + noise, 0, scale)
     return img
 
 
-def add_gaussian_blur(image, sigma_range=(0.5, 1.5)):
+def add_gaussian_blur(image, sigma_range=(0.2, 0.8)):
+    """
+    Mild blur only. Strong blur can erase tiny lesions.
+    """
     img = image.astype(np.float32)
+    scale = 255.0 if img.max() > 1.5 else 1.0
     sigma = np.random.uniform(sigma_range[0], sigma_range[1])
 
     if img.ndim == 3:
         blurred = np.empty_like(img)
         for c in range(img.shape[2]):
             blurred[..., c] = gaussian_filter(img[..., c], sigma=sigma)
-        return np.clip(blurred, 0, 255)
+        return np.clip(blurred, 0, scale)
     else:
-        return np.clip(gaussian_filter(img, sigma=sigma), 0, 255)
+        return np.clip(gaussian_filter(img, sigma=sigma), 0, scale)
 
 
-def adjust_brightness_contrast(image, brightness_range=(0.75, 1.25), contrast_range=(0.75, 1.25)):
+def adjust_brightness_contrast(
+    image,
+    brightness_range=(0.9, 1.1),
+    contrast_range=(0.9, 1.1)
+):
+    """
+    Conservative intensity perturbation.
+    """
     img = image.astype(np.float32)
+    scale = 255.0 if img.max() > 1.5 else 1.0
+
     brightness = np.random.uniform(brightness_range[0], brightness_range[1])
     contrast = np.random.uniform(contrast_range[0], contrast_range[1])
 
     mean = img.mean(axis=(0, 1), keepdims=True)
     img = (img - mean) * contrast + mean
     img = img * brightness
-    img = np.clip(img, 0, 255)
+    img = np.clip(img, 0, scale)
     return img
 
 
-def gamma_correction(image, gamma_range=(0.7, 1.5)):
-    img = image.astype(np.float32) / 255.0
+def gamma_correction(image, gamma_range=(0.9, 1.1)):
+    """
+    Mild gamma correction only.
+    """
+    img = image.astype(np.float32)
+    scale = 255.0 if img.max() > 1.5 else 1.0
+    img = img / scale
     gamma = np.random.uniform(gamma_range[0], gamma_range[1])
     img = np.power(np.clip(img, 0, 1), gamma)
-    img = np.clip(img * 255.0, 0, 255)
+    img = np.clip(img * scale, 0, scale)
     return img
 
 
@@ -184,24 +240,48 @@ def _resize_image(image, output_size):
     """
     image: HWC
     output_size: (H, W)
+
+    Uses bicubic interpolation for image resizing.
     """
     h, w = image.shape[:2]
     if (h, w) == tuple(output_size):
         return image
-    zoom_factors = (output_size[0] / h, output_size[1] / w, 1)
-    return zoom(image, zoom_factors, order=3)
+
+    out_h, out_w = output_size
+
+    # PIL expects uint8/float-compatible arrays; keep dtype behavior simple and safe
+    if image.shape[2] == 1:
+        img_2d = image[..., 0]
+        pil_img = Image.fromarray(img_2d.astype(np.float32), mode="F")
+        resized = pil_img.resize((out_w, out_h), resample=Image.BICUBIC)
+        resized = np.array(resized, dtype=np.float32)[..., None]
+    else:
+        # If image is float, PIL RGB handling is awkward; convert channel-wise
+        channels = []
+        for c in range(image.shape[2]):
+            pil_ch = Image.fromarray(image[..., c].astype(np.float32), mode="F")
+            ch_resized = pil_ch.resize((out_w, out_h), resample=Image.BICUBIC)
+            channels.append(np.array(ch_resized, dtype=np.float32))
+        resized = np.stack(channels, axis=-1)
+
+    return resized
 
 
 def _resize_label(label, output_size):
     """
     label: HW
     output_size: (H, W)
+
+    Uses nearest-neighbor interpolation for segmentation masks.
     """
     h, w = label.shape
     if (h, w) == tuple(output_size):
         return label
-    zoom_factors = (output_size[0] / h, output_size[1] / w)
-    return zoom(label, zoom_factors, order=0)
+
+    out_h, out_w = output_size
+    pil_lbl = Image.fromarray(label.astype(np.int32), mode="I")
+    resized = pil_lbl.resize((out_w, out_h), resample=Image.NEAREST)
+    return np.array(resized, dtype=label.dtype)
 
 
 def _pad_if_needed_image(image, output_size):
@@ -274,6 +354,22 @@ def _fit_to_size_label(label, output_size):
 
 
 # ----------------------------
+# Tensor conversion helper
+# ----------------------------
+def image_to_tensor(image):
+    """
+    Converts HWC numpy image to CHW torch.float32 tensor.
+    Keeps float precision instead of forcing uint8.
+    If input looks like [0,255], normalize to [0,1].
+    """
+    img = image.astype(np.float32)
+    if img.max() > 1.5:
+        img = img / 255.0
+    img = np.transpose(img, (2, 0, 1))
+    return torch.from_numpy(img).float()
+
+
+# ----------------------------
 # Train / val transforms
 # ----------------------------
 class TrainTransform(object):
@@ -281,36 +377,41 @@ class TrainTransform(object):
         self,
         output_size,
         low_res,
-        # spatial probabilities
-        p_random_crop=1.0,
-        p_rotation=0.5,
-        p_scaling=0.5,
-        p_elastic=0.1,
-        p_mirroring=0.5,
-        # intensity probabilities
-        p_gaussian_noise=0.15,
-        p_gaussian_blur=0.15,
-        p_brightness_contrast=0.1,
-        p_gamma=0.2,
-        # parameter ranges
+        # sampling
         crop_size=None,
-        foreground_oversample_prob=0.8,
-        rotation_range=(-10, 10),
-        scale_range=(0.7, 1.4),
+        p_random_crop=0.1,
+        foreground_oversample_prob=0.9,
+        lesion_dilation_radius=5,
+        # spatial probabilities
+        p_rotation=0.3,
+        p_scaling=0.05,
+        p_elastic=0.0,   # default off for small lesions
+        p_mirroring=0.,
+        # intensity probabilities
+        p_gaussian_noise=0.05,
+        p_gaussian_blur=0.05,
+        p_brightness_contrast=0.05,
+        p_gamma=0.05,
+        # parameter ranges
+        rotation_range=(-5, 5),
+        scale_range=(0.9, 1.1),
         anisotropic_scale=False,
-        elastic_alpha=20.0,
-        elastic_sigma=4.0,
-        noise_std_range=(0.0, 0.05),
-        blur_sigma_range=(0.5, 1.5),
-        brightness_range=(0.75, 1.25),
-        contrast_range=(0.75, 1.25),
-        gamma_range=(0.7, 1.5),
+        elastic_alpha=6.0,
+        elastic_sigma=8.0,
+        noise_std_range=(0.0, 0.02),
+        blur_sigma_range=(0.2, 0.8),
+        brightness_range=(0.9, 1.1),
+        contrast_range=(0.9, 1.1),
+        gamma_range=(0.9, 1.1),
     ):
         self.output_size = tuple(output_size)
         self.low_res = tuple(low_res)
         self.crop_size = tuple(crop_size) if crop_size is not None else tuple(output_size)
 
         self.p_random_crop = p_random_crop
+        self.foreground_oversample_prob = foreground_oversample_prob
+        self.lesion_dilation_radius = lesion_dilation_radius
+
         self.p_rotation = p_rotation
         self.p_scaling = p_scaling
         self.p_elastic = p_elastic
@@ -321,7 +422,6 @@ class TrainTransform(object):
         self.p_brightness_contrast = p_brightness_contrast
         self.p_gamma = p_gamma
 
-        self.foreground_oversample_prob = foreground_oversample_prob
         self.rotation_range = rotation_range
         self.scale_range = scale_range
         self.anisotropic_scale = anisotropic_scale
@@ -333,18 +433,21 @@ class TrainTransform(object):
         self.contrast_range = contrast_range
         self.gamma_range = gamma_range
 
-        self.to_tensor = T1.ToTensor()
-
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
-        # 1) Sampling / patch op: random crop with optional foreground oversampling
+        # 0) Ensure image has channel dim
+        if image.ndim == 2:
+            image = image[..., None]
+
+        # 1) Lesion-aware crop
         if random.random() < self.p_random_crop:
-            image, label = random_crop(
-                image,
-                label,
+            image, label = random_crop_lesion_aware(
+                image=image,
+                label=label,
                 crop_size=self.crop_size,
                 foreground_oversample_prob=self.foreground_oversample_prob,
+                lesion_dilation_radius=self.lesion_dilation_radius,
             )
 
         # 2) Spatial transforms
@@ -359,7 +462,7 @@ class TrainTransform(object):
                 anisotropic=self.anisotropic_scale,
             )
 
-        if random.random() < self.p_elastic:
+        if self.p_elastic > 0 and random.random() < self.p_elastic:
             image, label = elastic_deformation(
                 image,
                 label,
@@ -370,7 +473,7 @@ class TrainTransform(object):
         if random.random() < self.p_mirroring:
             image, label = random_mirror(image, label)
 
-        # 3) Intensity transforms (image only)
+        # 3) Intensity transforms (image only, conservative)
         if random.random() < self.p_gaussian_noise:
             image = add_gaussian_noise(image, std_range=self.noise_std_range)
 
@@ -387,15 +490,13 @@ class TrainTransform(object):
         if random.random() < self.p_gamma:
             image = gamma_correction(image, gamma_range=self.gamma_range)
 
-        # final resize to standard shape
+        # 4) Final resize
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
         low_res_label = _resize_label(label, self.low_res)
 
-        # image: use ToTensor as requested
-        image = self.to_tensor(image.astype(np.uint8) if image.dtype != np.uint8 else image)
-
-        # labels should remain integer class maps
+        # 5) To tensor
+        image = image_to_tensor(image)
         label = torch.from_numpy(label.astype(np.int64))
         low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
@@ -408,18 +509,20 @@ class TrainTransform(object):
 
 class ValTransform(object):
     def __init__(self, output_size, low_res):
-        self.output_size = output_size
-        self.low_res = low_res
-        self.to_tensor = T1.ToTensor()
+        self.output_size = tuple(output_size)
+        self.low_res = tuple(low_res)
 
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
+
+        if image.ndim == 2:
+            image = image[..., None]
 
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
         low_res_label = _resize_label(label, self.low_res)
 
-        image = self.to_tensor(image.astype(np.uint8) if image.dtype != np.uint8 else image)
+        image = image_to_tensor(image)
         label = torch.from_numpy(label.astype(np.int64))
         low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 

@@ -16,7 +16,7 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 
 from utils import DiceLossV2
-from datasets.dataset_psmav4 import PSMADataset, TrainTransform, ValTransform
+from datasets.dataset_psmav3 import PSMADataset, TrainTransform, ValTransform
 
 
 class SimpleWriter:
