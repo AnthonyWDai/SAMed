@@ -203,7 +203,7 @@ class PSMADataset(Dataset):
         sample_info = self.samples[idx]
 
         image = Image.open(sample_info["image_path"]).convert("RGB")
-        mask = Image.open(sample_info["mask_path"]).convert("L")
+        mask = Image.open(sample_info["mask_path"])
 
         image = np.array(image)          # HWC, uint8
         label = np.array(mask)           # HW, uint8/int
