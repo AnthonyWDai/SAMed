@@ -72,7 +72,7 @@ class TrainTransform(object):
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
 
-        low_res_label = _resize_label(label, self.low_res)
+        # low_res_label = _resize_label(label, self.low_res)
 
         # HWC -> CHW
         image = torch.from_numpy(image.astype(np.float32)).permute(2, 0, 1)
@@ -80,12 +80,12 @@ class TrainTransform(object):
             image = image / 255.0
 
         label = torch.from_numpy(label.astype(np.int64))
-        low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
+        # low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
             "image": image,
             "label": label,
-            "low_res_label": low_res_label,
+            # "low_res_label": low_res_label,
         }
 
 
@@ -99,7 +99,7 @@ class ValTransform(object):
 
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
-        low_res_label = _resize_label(label, self.low_res)
+        # low_res_label = _resize_label(label, self.low_res)
 
         # HWC -> CHW
         image = torch.from_numpy(image.astype(np.float32)).permute(2, 0, 1)
@@ -107,12 +107,12 @@ class ValTransform(object):
             image = image / 255.0
 
         label = torch.from_numpy(label.astype(np.int64))
-        low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
+        # low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
             "image": image,
             "label": label,
-            "low_res_label": low_res_label,
+            # "low_res_label": low_res_label,
         }
 
 
