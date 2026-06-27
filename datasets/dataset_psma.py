@@ -1,303 +1,217 @@
 import os
-import glob
+import random
+from pathlib import Path
+
 import numpy as np
-from PIL import Image
 import torch
+from PIL import Image
+from scipy import ndimage
+from scipy.ndimage import zoom
 from torch.utils.data import Dataset
-from torchvision import transforms
 
 
-import numpy as np
-import torch
-from PIL import Image
-from torchvision import transforms
+IMG_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
-def _prepare_image_for_pil(image: np.ndarray) -> np.ndarray:
+def random_rot_flip(image, label):
+    k = np.random.randint(0, 4)
+    image = np.rot90(image, k, axes=(0, 1))
+    label = np.rot90(label, k, axes=(0, 1))
+    axis = np.random.randint(0, 2)
+    image = np.flip(image, axis=axis).copy()
+    label = np.flip(label, axis=axis).copy()
+    return image, label
+
+
+def random_rotate(image, label):
+    angle = np.random.randint(-20, 20)
+    # image: HWC, rotate over spatial dims only
+    image = ndimage.rotate(image, angle, axes=(0, 1), order=1, reshape=False)
+    # label: HW
+    label = ndimage.rotate(label, angle, order=0, reshape=False)
+    return image, label
+
+
+def _resize_image(image, output_size):
     """
-    Convert image to uint8 HxW or HxWxC for PIL.
+    image: numpy array, HWC
+    output_size: (H, W)
     """
-    if not isinstance(image, np.ndarray):
-        image = np.array(image)
-
-    # Handle CHW -> HWC if needed
-    if image.ndim == 3 and image.shape[0] in [1, 3] and image.shape[-1] not in [1, 3]:
-        image = np.transpose(image, (1, 2, 0))
-
-    if image.dtype != np.uint8:
-        if np.issubdtype(image.dtype, np.floating):
-            # If already in [0,1], scale to [0,255]
-            if image.max() <= 1.0:
-                image = image * 255.0
-            image = np.clip(image, 0, 255)
-        else:
-            image = np.clip(image, 0, 255)
-        image = image.astype(np.uint8)
-
-    return image
+    h, w = image.shape[:2]
+    if (h, w) == tuple(output_size):
+        return image
+    zoom_factors = (output_size[0] / h, output_size[1] / w, 1)
+    return zoom(image, zoom_factors, order=3)
 
 
-def _prepare_binary_label(label: np.ndarray) -> np.ndarray:
+def _resize_label(label, output_size):
     """
-    Ensure binary segmentation mask is strictly 0/1.
-    Accepts masks like {0,1}, {0,255}, or arbitrary positive foreground.
+    label: numpy array, HW
+    output_size: (H, W)
     """
-    if not isinstance(label, np.ndarray):
-        label = np.array(label)
-
-    # Squeeze singleton channel if present
-    if label.ndim == 3 and label.shape[-1] == 1:
-        label = label[..., 0]
-    if label.ndim == 3 and label.shape[0] == 1:
-        label = label[0]
-
-    # Convert any positive value to 1
-    label = (label > 0).astype(np.uint8)
-    return label
-
-
-def _to_tensor_image(image: np.ndarray) -> torch.Tensor:
-    """
-    Convert HxW or HxWxC float image in [0,1] to CHW torch.float32.
-    """
-    if image.ndim == 2:
-        image = image[:, :, None]
-
-    if image.ndim != 3:
-        raise ValueError(f"Expected image ndim 2 or 3, got shape {image.shape}")
-
-    image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
-    return torch.from_numpy(image.astype(np.float32))
+    h, w = label.shape
+    if (h, w) == tuple(output_size):
+        return label
+    zoom_factors = (output_size[0] / h, output_size[1] / w)
+    return zoom(label, zoom_factors, order=0)
 
 
 class TrainTransform(object):
     def __init__(self, output_size, low_res):
-        self.output_size = tuple(output_size)
-        self.low_res = tuple(low_res)
-        self.resize_img = transforms.Resize(self.output_size, interpolation=Image.BILINEAR)
-        self.resize_mask_hr = transforms.Resize(self.output_size, interpolation=Image.NEAREST)
-        self.resize_mask_lr = transforms.Resize(self.low_res, interpolation=Image.NEAREST)
+        self.output_size = output_size
+        self.low_res = low_res
 
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
-        # --- image ---
-        image = _prepare_image_for_pil(image)
-        image_pil = Image.fromarray(image)
+        if random.random() > 0.5:
+            image, label = random_rot_flip(image, label)
+        elif random.random() > 0.5:
+            image, label = random_rotate(image, label)
 
-        # --- label ---
-        label = _prepare_binary_label(label)
-        label_pil = Image.fromarray(label)
+        image = _resize_image(image, self.output_size)
+        label = _resize_label(label, self.output_size)
 
-        # Resize
-        image_resized = self.resize_img(image_pil)
-        label_hr = self.resize_mask_hr(label_pil)
+        low_res_label = _resize_label(label, self.low_res)
 
-        # IMPORTANT: derive low-res label from high-res resized label for consistency
-        label_lr = self.resize_mask_lr(label_hr)
+        # HWC -> CHW
+        image = torch.from_numpy(image.astype(np.float32)).permute(2, 0, 1)
+        if image.max() > 1.0:
+            image = image / 255.0
 
-        # Convert back to numpy
-        image_np = np.array(image_resized).astype(np.float32) / 255.0
-        label_hr_np = np.array(label_hr).astype(np.uint8)
-        label_lr_np = np.array(label_lr).astype(np.uint8)
-
-        # Final label sanitization after resize
-        label_hr_np = (label_hr_np > 0).astype(np.uint8)
-        label_lr_np = (label_lr_np > 0).astype(np.uint8)
+        label = torch.from_numpy(label.astype(np.int64))
+        low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
-            "image": _to_tensor_image(image_np),
-            "label": torch.from_numpy(label_hr_np).long(),
-            "low_res_label": torch.from_numpy(label_lr_np).long(),
+            "image": image,
+            "label": label,
+            "low_res_label": low_res_label,
         }
 
 
 class ValTransform(object):
     def __init__(self, output_size, low_res):
-        self.output_size = tuple(output_size)
-        self.low_res = tuple(low_res)
-        self.resize_img = transforms.Resize(self.output_size, interpolation=Image.BILINEAR)
-        self.resize_mask_hr = transforms.Resize(self.output_size, interpolation=Image.NEAREST)
-        self.resize_mask_lr = transforms.Resize(self.low_res, interpolation=Image.NEAREST)
+        self.output_size = output_size
+        self.low_res = low_res
 
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
-        # Deterministic preprocessing only
-        image = _prepare_image_for_pil(image)
-        label = _prepare_binary_label(label)
+        image = _resize_image(image, self.output_size)
+        label = _resize_label(label, self.output_size)
+        low_res_label = _resize_label(label, self.low_res)
 
-        image_pil = Image.fromarray(image)
-        label_pil = Image.fromarray(label)
+        # HWC -> CHW
+        image = torch.from_numpy(image.astype(np.float32)).permute(2, 0, 1)
+        if image.max() > 1.0:
+            image = image / 255.0
 
-        image_resized = self.resize_img(image_pil)
-        label_hr = self.resize_mask_hr(label_pil)
-        label_lr = self.resize_mask_lr(label_hr)
-
-        image_np = np.array(image_resized).astype(np.float32) / 255.0
-        label_hr_np = np.array(label_hr).astype(np.uint8)
-        label_lr_np = np.array(label_lr).astype(np.uint8)
-
-        label_hr_np = (label_hr_np > 0).astype(np.uint8)
-        label_lr_np = (label_lr_np > 0).astype(np.uint8)
+        label = torch.from_numpy(label.astype(np.int64))
+        low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
-            "image": _to_tensor_image(image_np),
-            "label": torch.from_numpy(label_hr_np).long(),
-            "low_res_label": torch.from_numpy(label_lr_np).long(),
+            "image": image,
+            "label": label,
+            "low_res_label": low_res_label,
         }
-    
+
 
 class PSMADataset(Dataset):
     """
-    Supports both:
-      1) flat:
-         split/images/*.{jpg,jpeg,png,npy}
-         split/masks/*.{png,jpg,jpeg,npy}
+    Expected folder structure:
+    dataset/
+        train/
+            images/
+                cats/cat_001.jpg
+                dogs/dog_001.png
+            masks/
+                cats/cat_001.png
+                dogs/dog_001.png
+        val/
+            images/
+                cats/cat_101.jpg
+                dogs/dog_101.jpg
+            masks/
+                cats/cat_101.png
+                dogs/dog_101.png
 
-      2) nested:
-         split/images/<case>/*.{jpg,jpeg,png,npy}
-         split/masks/<case>/*.{png,jpg,jpeg,npy}
+    Notes:
+    - Image files can be .jpg/.jpeg/.png
+    - Mask files are matched by relative path stem, regardless of extension
+    - Masks are loaded as single-channel integer label maps
     """
-    IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".npy"]
-    MASK_EXTS = [".png", ".jpg", ".jpeg", ".npy"]
 
     def __init__(self, base_dir, split="train", transform=None):
-        self.base_dir = base_dir
+        assert split in ["train", "val"], f"Unsupported split: {split}"
+        self.base_dir = Path(base_dir)
         self.split = split
         self.transform = transform
-        self.image_dir = os.path.join(base_dir, split, "images")
-        self.mask_dir = os.path.join(base_dir, split, "masks")
 
-        if not os.path.isdir(self.image_dir):
+        self.image_dir = self.base_dir / split / "images"
+        self.mask_dir = self.base_dir / split / "masks"
+
+        if not self.image_dir.exists():
             raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
-        if not os.path.isdir(self.mask_dir):
+        if not self.mask_dir.exists():
             raise FileNotFoundError(f"Mask directory not found: {self.mask_dir}")
 
-        self.image_paths = self._collect_files(self.image_dir, self.IMAGE_EXTS)
-        if len(self.image_paths) == 0:
-            raise RuntimeError(
-                f"No image files with extensions {self.IMAGE_EXTS} found under {self.image_dir}"
-            )
+        self.samples = self._build_samples()
 
-        self.samples = []
-        missing_masks = []
+    def _build_samples(self):
+        samples = []
+        image_paths = []
 
-        for image_path in self.image_paths:
-            mask_path = self._find_matching_mask(image_path)
+        for p in self.image_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in IMG_EXTENSIONS:
+                image_paths.append(p)
+
+        image_paths = sorted(image_paths)
+
+        if len(image_paths) == 0:
+            raise RuntimeError(f"No image files found in {self.image_dir}")
+
+        for img_path in image_paths:
+            rel_path = img_path.relative_to(self.image_dir)
+            rel_stem = rel_path.with_suffix("")
+
+            # search corresponding mask with any supported extension
+            mask_path = None
+            for ext in IMG_EXTENSIONS:
+                candidate = (self.mask_dir / rel_stem).with_suffix(ext)
+                if candidate.exists():
+                    mask_path = candidate
+                    break
+
             if mask_path is None:
-                missing_masks.append(image_path)
-                continue
-            self.samples.append((image_path, mask_path))
+                raise FileNotFoundError(
+                    f"No matching mask found for image: {img_path}. "
+                    f"Expected under {self.mask_dir / rel_stem} with one of {IMG_EXTENSIONS}"
+                )
 
-        if len(self.samples) == 0:
-            raise RuntimeError("No matched image-mask pairs found.")
+            samples.append({
+                "image_path": img_path,
+                "mask_path": mask_path,
+                "case_name": str(rel_stem),
+            })
 
-        if len(missing_masks) > 0:
-            print(f"[WARN] {len(missing_masks)} images do not have matching masks and were skipped.")
-            print(f"[WARN] Example missing image: {missing_masks[0]}")
-
-    def _collect_files(self, root_dir, extensions):
-        files = []
-        for ext in extensions:
-            files.extend(glob.glob(os.path.join(root_dir, "**", f"*{ext}"), recursive=True))
-        return sorted(files)
-
-    def _find_matching_mask(self, image_path):
-        rel_path = os.path.relpath(image_path, self.image_dir)
-        rel_stem = os.path.splitext(rel_path)[0]
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-
-        # Preferred: preserve relative subfolder structure
-        for ext in self.MASK_EXTS:
-            candidate = os.path.join(self.mask_dir, rel_stem + ext)
-            if os.path.isfile(candidate):
-                return candidate
-
-        # Fallback: same basename directly under mask_dir
-        for ext in self.MASK_EXTS:
-            candidate = os.path.join(self.mask_dir, base_name + ext)
-            if os.path.isfile(candidate):
-                return candidate
-
-        return None
-
-    def _load_image(self, path):
-        ext = os.path.splitext(path)[1].lower()
-
-        if ext == ".npy":
-            image = np.load(path)
-
-            if image.ndim == 2:
-                pass
-            elif image.ndim == 3:
-                if image.shape[0] in [1, 3] and image.shape[-1] not in [1, 3]:
-                    image = np.transpose(image, (1, 2, 0))
-
-                if image.shape[-1] == 1:
-                    image = image[..., 0]
-                elif image.shape[-1] == 3:
-                    image = image.astype(np.float32)
-                    lo, hi = np.percentile(image, [1, 99])
-                    if hi > lo:
-                        image = np.clip(image, lo, hi)
-                        image = (image - lo) / (hi - lo)
-                    else:
-                        image = np.zeros_like(image, dtype=np.float32)
-                    return (image * 255).astype(np.uint8)
-                else:
-                    raise ValueError(f"Unsupported channel dimension in .npy image shape {image.shape} for file: {path}")
-            else:
-                raise ValueError(f"Unsupported .npy image shape {image.shape} for file: {path}")
-
-            image = image.astype(np.float32)
-            lo, hi = np.percentile(image, [1, 99])
-            if hi > lo:
-                image = np.clip(image, lo, hi)
-                image = (image - lo) / (hi - lo)
-            else:
-                image = np.zeros_like(image, dtype=np.float32)
-
-            image = (image * 255).astype(np.uint8)
-            image = np.stack([image] * 3, axis=-1)
-            return image
-
-        image = Image.open(path).convert("RGB")
-        return np.array(image)
-
-    def _load_mask(self, path):
-        ext = os.path.splitext(path)[1].lower()
-
-        if ext == ".npy":
-            mask = np.load(path)
-        else:
-            mask = np.array(Image.open(path))
-
-        # Reduce mask to single channel if needed
-        if mask.ndim == 3:
-            if mask.shape[-1] == 1:
-                mask = mask[:, :, 0]
-            else:
-                mask = mask[:, :, 0]
-
-        return mask
+        return samples
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        image_path, mask_path = self.samples[idx]
+        sample_info = self.samples[idx]
 
-        image = self._load_image(image_path)
-        mask = self._load_mask(mask_path)
+        image = Image.open(sample_info["image_path"]).convert("RGB")
+        mask = Image.open(sample_info["mask_path"])
 
-        sample = {
-            'image': image,
-            'label': mask
-        }
+        image = np.array(image)          # HWC, uint8
+        label = np.array(mask)           # HW, uint8/int
+
+        sample = {"image": image, "label": label}
 
         if self.transform is not None:
             sample = self.transform(sample)
 
-        sample['case_name'] = os.path.basename(image_path)
+        sample["case_name"] = sample_info["case_name"]
         return sample
