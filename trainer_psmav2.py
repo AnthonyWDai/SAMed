@@ -462,7 +462,7 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
         for _, sampled_batch in enumerate(trainloader):
             image_batch = sampled_batch["image"].cuda(non_blocking=True)
             label_batch = sampled_batch["label"].cuda(non_blocking=True)
-            low_res_label_batch = sampled_batch["low_res_label"].cuda(non_blocking=True)
+            # low_res_label_batch = sampled_batch["low_res_label"].cuda(non_blocking=True)
 
             assert image_batch.max() <= 3, f"image_batch max: {image_batch.max()}"
 

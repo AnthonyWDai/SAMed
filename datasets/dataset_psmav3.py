@@ -277,6 +277,84 @@ def _pad_if_needed_label(label, output_size):
     )
 
 
+def _pad_to_aspect_image(image, target_size):
+    """
+    Pad image to match target aspect ratio without stretching.
+    image: HWC
+    target_size: (H, W)
+    """
+    h, w = image.shape[:2]
+    target_h, target_w = target_size
+    target_ratio = target_h / float(target_w)
+    ratio = h / float(w)
+
+    if abs(ratio - target_ratio) < 1e-8:
+        return image
+
+    if ratio > target_ratio:
+        # image too tall -> pad width
+        new_w = int(round(h / target_ratio))
+        pad_w = max(0, new_w - w)
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        return np.pad(
+            image,
+            ((0, 0), (pad_left, pad_right), (0, 0)),
+            mode="reflect"
+        )
+    else:
+        # image too wide -> pad height
+        new_h = int(round(w * target_ratio))
+        pad_h = max(0, new_h - h)
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        return np.pad(
+            image,
+            ((pad_top, pad_bottom), (0, 0), (0, 0)),
+            mode="reflect"
+        )
+
+
+def _pad_to_aspect_label(label, target_size):
+    """
+    Pad label to match target aspect ratio without stretching.
+    label: HW
+    target_size: (H, W)
+    """
+    h, w = label.shape
+    target_h, target_w = target_size
+    target_ratio = target_h / float(target_w)
+    ratio = h / float(w)
+
+    if abs(ratio - target_ratio) < 1e-8:
+        return label
+
+    if ratio > target_ratio:
+        # label too tall -> pad width
+        new_w = int(round(h / target_ratio))
+        pad_w = max(0, new_w - w)
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        return np.pad(
+            label,
+            ((0, 0), (pad_left, pad_right)),
+            mode="constant",
+            constant_values=0
+        )
+    else:
+        # label too wide -> pad height
+        new_h = int(round(w * target_ratio))
+        pad_h = max(0, new_h - h)
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        return np.pad(
+            label,
+            ((pad_top, pad_bottom), (0, 0)),
+            mode="constant",
+            constant_values=0
+        )
+
+
 def _fit_to_size_image(image, output_size):
     image = _pad_if_needed_image(image, output_size)
     h, w = image.shape[:2]
@@ -446,16 +524,16 @@ class TrainTransform(object):
             image = gamma_correction(image, gamma_range=self.gamma_range)
 
         # No final resize; crop already guarantees output_size
-        low_res_label = _resize_label(label, self.low_res)
+        # low_res_label = _resize_label(label, self.low_res)
 
         image = image_to_tensor(image)
         label = torch.from_numpy(label.astype(np.int64))
-        low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
+        # low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
             "image": image,
             "label": label,
-            "low_res_label": low_res_label,
+            # "low_res_label": low_res_label,
         }
 
 
@@ -470,18 +548,23 @@ class ValTransform(object):
         if image.ndim == 2:
             image = image[..., None]
 
+        # keep scale of hw in validation
+        image = _pad_to_aspect_image(image, self.output_size)
+        label = _pad_to_aspect_label(label, self.output_size)
+
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
-        low_res_label = _resize_label(label, self.low_res)
+
+        # low_res_label = _resize_label(label, self.low_res)
 
         image = image_to_tensor(image)
         label = torch.from_numpy(label.astype(np.int64))
-        low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
+        # low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
             "image": image,
             "label": label,
-            "low_res_label": low_res_label,
+            # "low_res_label": low_res_label,
         }
 
 
