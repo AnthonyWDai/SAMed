@@ -80,6 +80,28 @@ def save_lora_checkpoint(model, save_path):
         model.module.save_lora_parameters(save_path)
 
 
+def get_adaptive_num_workers(requested=None, reserve_cores=1, max_cap=8):
+    """
+    Choose a safe num_workers for PyTorch DataLoader.
+
+    Args:
+        requested: user-requested workers, or None for auto
+        reserve_cores: leave some CPU cores free
+        max_cap: hard upper bound
+
+    Returns:
+        int: num_workers
+    """
+    cpu_count = os.cpu_count() or 1
+    available = max(1, cpu_count - reserve_cores)
+    auto_workers = min(available, max_cap)
+
+    if requested is None:
+        return auto_workers
+    
+    return min(requested, auto_workers)
+
+
 def set_optimizer(args, model, initial_lr):
     params = filter(lambda p: p.requires_grad, model.parameters())
     if args.AdamW:
@@ -409,20 +431,24 @@ def trainer_psma(args, model, snapshot_path, multimask_output, low_res):
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
+    num_workers = get_adaptive_num_workers(requested=8)
+
     trainloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=8,
+        num_workers=num_workers,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
     )
+
+    num_workers = get_adaptive_num_workers(requested=4)
 
     valloader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
     )
