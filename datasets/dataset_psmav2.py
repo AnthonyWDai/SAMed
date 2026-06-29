@@ -407,13 +407,13 @@ class TrainTransform(object):
         short_size_range=None,
         max_size=None,
         # spatial probabilities
-        p_rotation=0.3,
-        p_scaling=0.2,
-        p_elastic=0.0,
+        p_rotation=0.5,
+        p_scaling=0.,
+        p_elastic=0.,
         p_mirroring=0.5,
         # intensity probabilities
-        p_gaussian_noise=0.1,
-        p_gaussian_blur=0.05,
+        p_gaussian_noise=0.,
+        p_gaussian_blur=0.,
         p_brightness_contrast=0.,
         p_gamma=0.,
         # parameter ranges
@@ -432,7 +432,7 @@ class TrainTransform(object):
         self.low_res = tuple(low_res)
         
         if short_size_range is None:
-            based_size = np.mean(self.output_size)
+            based_size = np.mean(output_size)
             short_size_range = (
                 make_divisible(based_size / 1.07, 4), # 480
                 make_divisible(based_size * 1.25, 4) # 640
