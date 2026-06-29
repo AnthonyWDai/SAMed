@@ -8,6 +8,7 @@ from scipy import ndimage
 from scipy.ndimage import gaussian_filter, map_coordinates
 from torch.utils.data import Dataset
 
+
 IMG_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 
@@ -95,38 +96,21 @@ def elastic_deformation(image, label, alpha=6.0, sigma=8.0):
     return deformed_img, deformed_lbl
 
 
-def random_crop(image, label, crop_size):
+def resize_longest_side(image, label, max_size):
     """
-    Standard random crop.
+    Resize image/label so that the longest side becomes max_size,
+    preserving aspect ratio.
+
     image: HWC
     label: HW
-    crop_size: (crop_h, crop_w)
     """
     h, w = label.shape
-    crop_h, crop_w = crop_size
+    longest = max(h, w)
 
-    if h < crop_h or w < crop_w:
-        image = _pad_if_needed_image(image, crop_size)
-        label = _pad_if_needed_label(label, crop_size)
-        h, w = label.shape
+    if longest == max_size:
+        return image, label
 
-    y1 = np.random.randint(0, h - crop_h + 1)
-    x1 = np.random.randint(0, w - crop_w + 1)
-
-    image = image[y1:y1 + crop_h, x1:x1 + crop_w, :]
-    label = label[y1:y1 + crop_h, x1:x1 + crop_w]
-    return image, label
-
-
-def random_short_side_resize(image, label, short_size_range=(256, 512), max_size=1024):
-    """
-    Resize image/label so that the short side is randomly sampled
-    from short_size_range, preserving aspect ratio.
-    """
-    h, w = label.shape
-    target_short = random.randint(short_size_range[0], short_size_range[1])
-    scale = min(target_short / float(min(h, w)), max_size / float(max(h, w)))
-
+    scale = max_size / float(longest)
     new_h = max(1, int(round(h * scale)))
     new_w = max(1, int(round(w * scale)))
 
@@ -404,16 +388,15 @@ class TrainTransform(object):
         self,
         output_size,
         low_res,
-        short_size_range=None,
-        max_size=None,
+        train_max_size=None,
         # spatial probabilities
         p_rotation=0.5,
         p_scaling=0.,
         p_elastic=0.,
         p_mirroring=0.5,
         # intensity probabilities
-        p_gaussian_noise=0.,
-        p_gaussian_blur=0.,
+        p_gaussian_noise=0.1,
+        p_gaussian_blur=0.1,
         p_brightness_contrast=0.,
         p_gamma=0.,
         # parameter ranges
@@ -430,21 +413,11 @@ class TrainTransform(object):
     ):
         self.output_size = tuple(output_size)
         self.low_res = tuple(low_res)
-        
-        if short_size_range is None:
-            based_size = np.mean(output_size)
-            short_size_range = (
-                make_divisible(based_size / 1.07, 4), # 480
-                make_divisible(based_size * 1.25, 4) # 640
-            )
-        
-        self.short_size_range = tuple(short_size_range)
-        
-        if max_size is None:
-            based_size = np.mean(self.output_size)
-            max_size = based_size * 2
-        self.max_size = max_size
-        
+
+        if train_max_size is None:
+            train_max_size = max(self.output_size)
+        self.train_max_size = int(train_max_size)
+
         self.p_rotation = p_rotation
         self.p_scaling = p_scaling
         self.p_elastic = p_elastic
@@ -472,12 +445,11 @@ class TrainTransform(object):
         if image.ndim == 2:
             image = image[..., None]
 
-        # 1) Random short-side resize
-        image, label = random_short_side_resize(
+        # 1) Resize by longest side
+        image, label = resize_longest_side(
             image,
             label,
-            short_size_range=self.short_size_range,
-            max_size=self.max_size,
+            max_size=self.train_max_size,
         )
 
         # 2) Spatial transforms
@@ -503,8 +475,12 @@ class TrainTransform(object):
         if random.random() < self.p_mirroring:
             image, label = random_mirror(image, label)
 
-        # 3) Normal random crop to output size
-        image, label = random_crop(image, label, self.output_size)
+        # 3) Pad to target aspect ratio, then resize to output_size
+        image = _pad_to_aspect_image(image, self.output_size)
+        label = _pad_to_aspect_label(label, self.output_size)
+
+        image = _resize_image(image, self.output_size)
+        label = _resize_label(label, self.output_size)
 
         # 4) Intensity transforms
         if random.random() < self.p_gaussian_noise:
@@ -523,17 +499,12 @@ class TrainTransform(object):
         if random.random() < self.p_gamma:
             image = gamma_correction(image, gamma_range=self.gamma_range)
 
-        # No final resize; crop already guarantees output_size
-        # low_res_label = _resize_label(label, self.low_res)
-
         image = image_to_tensor(image)
         label = torch.from_numpy(label.astype(np.int64))
-        # low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
             "image": image,
             "label": label,
-            # "low_res_label": low_res_label,
         }
 
 
@@ -555,16 +526,12 @@ class ValTransform(object):
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
 
-        # low_res_label = _resize_label(label, self.low_res)
-
         image = image_to_tensor(image)
         label = torch.from_numpy(label.astype(np.int64))
-        # low_res_label = torch.from_numpy(low_res_label.astype(np.int64))
 
         return {
             "image": image,
             "label": label,
-            # "low_res_label": low_res_label,
         }
 
 
