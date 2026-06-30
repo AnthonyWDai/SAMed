@@ -31,7 +31,7 @@ class FolderGroupedBatchSampler(Sampler):
     ):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.drop_last = drop_last
+        self.drop_last = drop_last or random_drop_within_folder
         self.shuffle = shuffle
         self.shuffle_within_folder = shuffle_within_folder
         self.random_drop_within_folder = random_drop_within_folder

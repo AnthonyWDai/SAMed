@@ -394,7 +394,7 @@ class TrainTransform(object):
         p_scaling=0.,
         p_elastic=0.,
         p_mirroring=0.5,
-        p_paddingr=0.5,
+        p_paddingr=0.,
         # intensity probabilities
         p_gaussian_noise=0.,
         p_gaussian_blur=0.,
