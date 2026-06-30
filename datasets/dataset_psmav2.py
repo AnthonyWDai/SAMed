@@ -394,9 +394,10 @@ class TrainTransform(object):
         p_scaling=0.,
         p_elastic=0.,
         p_mirroring=0.5,
+        p_paddingr=0.5,
         # intensity probabilities
-        p_gaussian_noise=0.1,
-        p_gaussian_blur=0.1,
+        p_gaussian_noise=0.,
+        p_gaussian_blur=0.,
         p_brightness_contrast=0.,
         p_gamma=0.,
         # parameter ranges
@@ -422,6 +423,7 @@ class TrainTransform(object):
         self.p_scaling = p_scaling
         self.p_elastic = p_elastic
         self.p_mirroring = p_mirroring
+        self.p_paddingr = p_paddingr
 
         self.p_gaussian_noise = p_gaussian_noise
         self.p_gaussian_blur = p_gaussian_blur
@@ -476,8 +478,9 @@ class TrainTransform(object):
             image, label = random_mirror(image, label)
 
         # 3) Pad to target aspect ratio, then resize to output_size
-        image = _pad_to_aspect_image(image, self.output_size)
-        label = _pad_to_aspect_label(label, self.output_size)
+        if random.random() < self.p_paddingr:
+            image = _pad_to_aspect_image(image, self.output_size)
+            label = _pad_to_aspect_label(label, self.output_size)
 
         image = _resize_image(image, self.output_size)
         label = _resize_label(label, self.output_size)
